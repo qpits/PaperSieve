@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ config.venue_id or slug }} — PaperSieve{% endblock %}
+{% block content %}
+  <span class="drawer-label">CARD CATALOG · PROJECT</span>
+  <h1>{{ config.venue_id or slug }}</h1>
+  <p class="subtitle">
+    <a href="{{ url_for('project_config', slug=slug) }}">edit config</a>
+  </p>
+
+  <div class="controls">
+    <form id="runForm" data-slug="{{ slug }}" class="run-form">
+      <label class="checkbox"><input type="checkbox" name="force_refresh_papers"> refetch papers</label>
+      <label class="checkbox"><input type="checkbox" name="force_refresh_embeddings"> re-embed all</label>
+      <button type="submit" id="runButton">Run</button>
+    </form>
+  </div>
+
+  <div id="progressView" class="progress-view" hidden>
+    <div class="progress-phase" id="progressPhase">starting…</div>
+    <progress id="progressBar" max="1" value="0"></progress>
+    <div class="progress-count" id="progressCount"></div>
+    <div class="progress-error" id="progressError" hidden></div>
+  </div>
+
+  <div id="resultsView" hidden>
+    <div class="meta-line" id="metaLine"></div>
+    <div class="tabs" id="tabs"></div>
+    <div class="controls">
+      <input type="text" id="filterInput" placeholder="Filter by title, author, or keyword...">
+    </div>
+    <div class="controls">
+      <label class="range-label">meta-score
+        <input type="number" id="metaMin" min="0" max="100" value="0" step="1"> –
+        <input type="number" id="metaMax" min="0" max="100" value="100" step="1">
+      </label>
+    </div>
+    <div id="tiersContainer"></div>
+  </div>
+
+  <p id="noResults" class="empty" {% if show_results %}hidden{% endif %}>
+    No results yet — click Run above.
+  </p>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+  PaperSieve.initProjectPage({
+    slug: {{ slug|tojson }},
+    initialStatus: {{ status|tojson }},
+    showResults: {{ show_results|tojson }},
+  });
+</script>
+{% endblock %}

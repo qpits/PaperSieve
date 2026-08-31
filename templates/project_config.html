@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ slug }} — PaperSieve{% endblock %}
+{% block content %}
+  <span class="drawer-label">CARD CATALOG · CONFIG</span>
+  <h1>{{ config.venue_id or slug }}</h1>
+  <p class="subtitle"><a href="{{ url_for('project_page', slug=slug) }}">&larr; back to project</a></p>
+
+  <form method="post" class="form">
+    <label>Queries (one per line)
+      <textarea name="queries" rows="6">{{ config.queries|join('\n') }}</textarea>
+    </label>
+    <label>Venue filter (one term per line, matches OpenReview's "venue" tabs)
+      <textarea name="venue_filter" rows="3" placeholder="accepted&#10;oral&#10;poster&#10;spotlight">{{ config.venue_filter|join('\n') }}</textarea>
+    </label>
+    <p class="hint">
+      Case-insensitive substrings matched against each paper's OpenReview
+      <code>venue</code>/<code>venueid</code> text (e.g. "poster", "oral",
+      "spotlight", or "Rejected"/"Withdrawn" to include those). The special
+      term "accepted" matches any accepted paper regardless of exact
+      wording. Defaults to accepted-only — clear this field (save it empty)
+      to fetch everything instead. Only takes effect once the venue has
+      released decisions — before that every paper's venue field is blank.
+    </p>
+    <details class="advanced">
+      <summary>Advanced</summary>
+      <label>Max papers
+        <input type="number" name="max_papers" value="{{ config.max_papers }}" min="1">
+      </label>
+    </details>
+    <label>Embedding backend
+      <select name="backend">
+        <option value="local" {% if config.embedding.backend == 'local' %}selected{% endif %}>local</option>
+        <option value="api" {% if config.embedding.backend == 'api' %}selected{% endif %}>api</option>
+      </select>
+    </label>
+    <label>Local model
+      <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
+    </label>
+    <label>Tier method
+      <select name="tier_method">
+        <option value="percentile" {% if config.tiers.method == 'percentile' %}selected{% endif %}>percentile</option>
+        <option value="absolute" {% if config.tiers.method == 'absolute' %}selected{% endif %}>absolute</option>
+      </select>
+    </label>
+    <label>Good threshold
+      <input type="number" name="good_threshold" value="{{ config.tiers.good_threshold }}">
+    </label>
+    <label>Medium threshold
+      <input type="number" name="medium_threshold" value="{{ config.tiers.medium_threshold }}">
+    </label>
+    <p class="hint">Changing the embedding model or queries only re-embeds what's new — existing embeddings stay cached.</p>
+    <button type="submit">Save</button>
+  </form>
+{% endblock %}

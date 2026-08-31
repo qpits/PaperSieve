@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["app", "pipeline"]
+
+[project]
+name = "papersieve"
+version = "0.1.0"
+description = "Fetch, embed, and rank OpenReview submissions against your own queries."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "flask>=3.0",
+    "python-dotenv>=1.0",
+    "openreview-py>=1.40",
+    "waitress>=3.0",
+]
+
+[project.optional-dependencies]
+# Only needed for embedding.backend: "local" (runs a sentence-transformers
+# model on your own machine). If you only use the "api" backend, skip this
+# extra entirely and no torch/sentence-transformers download happens.
+local = [
+    "sentence-transformers>=2.6",
+]

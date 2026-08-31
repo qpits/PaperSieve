@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}PaperSieve — Projects{% endblock %}
+{% block content %}
+  <span class="drawer-label">CARD CATALOG · PROJECTS</span>
+  <h1>Your projects</h1>
+  <p class="subtitle">Each project is one OpenReview venue: its own cache, embeddings, and rankings.</p>
+
+  {% if projects %}
+    <div class="project-list">
+      {% for p in projects %}
+        <a class="project-row" href="{{ url_for('project_page', slug=p.slug) }}">
+          <span class="project-venue">{{ p.venue_id }}</span>
+          <span class="project-status status-{{ p.status }}">{{ p.status }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty">No projects yet — create one below.</p>
+  {% endif %}
+
+  <h2>New project</h2>
+  <form method="post" action="{{ url_for('create_project') }}" class="form">
+    <label>Venue ID
+      <input type="text" name="venue_id" placeholder="ICLR.cc/2026/Conference" required>
+    </label>
+    <label>Queries (one per line)
+      <textarea name="queries" rows="4" placeholder="retrieval augmented generation&#10;robustness to distribution shift"></textarea>
+    </label>
+    <details class="advanced">
+      <summary>Advanced</summary>
+      <label>Submission invitation
+        <input type="text" name="submission_invitation" value="Submission">
+      </label>
+      <p class="hint">
+        The OpenReview invitation to fetch submissions from. "Submission" is
+        correct for essentially every venue; only change this if the run
+        fails to find any papers.
+      </p>
+      <label>Max papers
+        <input type="number" name="max_papers" value="5000" min="1">
+      </label>
+    </details>
+    <button type="submit">Create project</button>
+  </form>
+{% endblock %}
