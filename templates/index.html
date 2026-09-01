@@ -23,9 +23,6 @@
     <label>Venue ID
       <input type="text" name="venue_id" placeholder="ICLR.cc/2026/Conference" required>
     </label>
-    <label>Queries (one per line)
-      <textarea name="queries" rows="4" placeholder="retrieval augmented generation&#10;robustness to distribution shift"></textarea>
-    </label>
     <details class="advanced">
       <summary>Advanced</summary>
       <label>Submission invitation
@@ -36,10 +33,55 @@
         correct for essentially every venue; only change this if the run
         fails to find any papers.
       </p>
-      <label>Max papers
-        <input type="number" name="max_papers" value="5000" min="1">
-      </label>
     </details>
     <button type="submit">Create project</button>
   </form>
+  <p class="hint">Queries, embedding model, and other settings are configured on the project page after creation.</p>
+
+  <details class="advanced">
+    <summary>Global defaults</summary>
+    <p class="hint">Applied to any project that doesn't override a field itself.</p>
+
+    <h2>Environment keys</h2>
+    <ul class="env-list">
+      {% for key, present in env_status.items() %}
+        <li>{{ key }} — {% if present %}<span class="status-done">set</span>{% else %}<span class="status-error">missing</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+    <p class="hint">Edit <code>.env</code> by hand to set these — never entered here.</p>
+
+    <form method="post" action="{{ url_for('settings') }}" class="form">
+      <label>Embedding backend
+        <select name="backend">
+          <option value="local" {% if config.embedding.backend == 'local' %}selected{% endif %}>local</option>
+          <option value="api" {% if config.embedding.backend == 'api' %}selected{% endif %}>api</option>
+        </select>
+      </label>
+      <label>Local model
+        <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
+      </label>
+      <label>API base URL
+        <input type="text" name="api_base_url" value="{{ config.embedding.api.base_url }}">
+      </label>
+      <label>API model
+        <input type="text" name="api_model" value="{{ config.embedding.api.model }}">
+      </label>
+      <label>API key env var
+        <input type="text" name="api_key_env" value="{{ config.embedding.api.api_key_env }}">
+      </label>
+      <label>Tier method
+        <select name="tier_method">
+          <option value="percentile" {% if config.tiers.method == 'percentile' %}selected{% endif %}>percentile</option>
+          <option value="absolute" {% if config.tiers.method == 'absolute' %}selected{% endif %}>absolute</option>
+        </select>
+      </label>
+      <label>Good threshold
+        <input type="number" name="good_threshold" value="{{ config.tiers.good_threshold }}">
+      </label>
+      <label>Medium threshold
+        <input type="number" name="medium_threshold" value="{{ config.tiers.medium_threshold }}">
+      </label>
+      <button type="submit">Save</button>
+    </form>
+  </details>
 {% endblock %}

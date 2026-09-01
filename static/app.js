@@ -17,13 +17,18 @@ const PaperSieve = (function () {
   }
 
   function initProjectPage({ slug, initialStatus, showResults }) {
-    const runForm = document.getElementById("runForm");
+    const configSection = document.getElementById("configSection");
+    const configForm = document.getElementById("configForm");
+    const toggleConfig = document.getElementById("toggleConfig");
+    const backendSelect = document.getElementById("backendSelect");
     const runButton = document.getElementById("runButton");
+    const stopButton = document.getElementById("stopButton");
     const progressView = document.getElementById("progressView");
     const progressPhase = document.getElementById("progressPhase");
     const progressBar = document.getElementById("progressBar");
     const progressCount = document.getElementById("progressCount");
     const progressError = document.getElementById("progressError");
+    const progressLog = document.getElementById("progressLog");
     const resultsView = document.getElementById("resultsView");
     const noResults = document.getElementById("noResults");
 
@@ -61,14 +66,26 @@ const PaperSieve = (function () {
       } else {
         progressError.hidden = true;
       }
+
+      if (status.log) {
+        progressLog.textContent = status.log;
+        progressLog.scrollTop = progressLog.scrollHeight;
+      }
     }
 
     function startPolling() {
+      // poll() first and unconditionally: if anything below throws, polling
+      // has already started, so status updates keep flowing instead of
+      // silently never starting (this is what caused the "stuck at
+      // starting forever" bug -- an exception here used to abort before
+      // poll() was ever reached).
+      poll();
       progressView.hidden = false;
       resultsView.hidden = true;
       noResults.hidden = true;
+      configSection.hidden = true;
       runButton.disabled = true;
-      poll();
+      stopButton.hidden = false;
     }
 
     function poll() {
@@ -80,16 +97,22 @@ const PaperSieve = (function () {
             pollTimer = setTimeout(poll, 1000);
           } else {
             runButton.disabled = false;
+            stopButton.hidden = true;
             if (status.state === "done") {
               progressView.hidden = true;
               loadResults();
             }
           }
         })
-        .catch(() => {
+        .catch((err) => {
+          console.error("status poll failed, retrying", err);
           pollTimer = setTimeout(poll, 2000);
         });
     }
+
+    stopButton.addEventListener("click", () => {
+      fetch(`/project/${slug}/stop`, { method: "POST" }).then(poll);
+    });
 
     function loadResults() {
       fetch(`/project/${slug}/data`)
@@ -196,10 +219,28 @@ const PaperSieve = (function () {
       });
     }
 
-    runForm.addEventListener("submit", (e) => {
+    configForm.addEventListener("submit", (e) => e.preventDefault());
+
+    function updateBackendFields() {
+      const backend = backendSelect.value;
+      document.querySelectorAll("[data-backend]").forEach((el) => {
+        el.hidden = el.dataset.backend !== backend;
+      });
+    }
+    backendSelect.addEventListener("change", updateBackendFields);
+    updateBackendFields();
+
+    toggleConfig.addEventListener("click", (e) => {
       e.preventDefault();
-      const formData = new FormData(runForm);
-      fetch(`/project/${slug}/run`, { method: "POST", body: formData }).then(startPolling);
+      configSection.hidden = !configSection.hidden;
+    });
+
+    runButton.addEventListener("click", () => {
+      const formData = new FormData(configForm);
+      fetch(`/project/${slug}/config`, { method: "POST", body: formData })
+        .then(() => fetch(`/project/${slug}/run`, { method: "POST", body: formData }))
+        .then(startPolling)
+        .catch((err) => console.error("failed to start run", err));
     });
 
     document.getElementById("filterInput").addEventListener("input", (e) => {

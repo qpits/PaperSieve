@@ -40,7 +40,7 @@ ProgressCallback = Callable[[str, int, Optional[int]], None]
 DEFAULT_CONFIG: Dict[str, Any] = {
     "venue_id": "",
     "submission_invitation": "Submission",
-    "max_papers": 5000,
+    "max_papers": 30000,
     # Case-insensitive substrings matched against each note's `venue` /
     # `venueid` content field (e.g. "poster", "oral", "spotlight" -- or
     # "Rejected"/"Withdrawn" to explicitly include those). "accepted" is a
@@ -317,6 +317,7 @@ def fetch_papers(
             cached_filter = None
 
     if not force_refresh and cache_path.exists() and cached_filter == venue_filter:
+        print("Using cached papers (venue_filter unchanged).", flush=True)
         with open(cache_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -327,6 +328,7 @@ def fetch_papers(
     cap = config["max_papers"]
     invitation = f"{venue_id}/-/{inv_type}"
 
+    print(f"Authenticating with OpenReview and fetching '{invitation}' (venue_filter={venue_filter})...", flush=True)
     v2_client = make_openreview_client("https://api2.openreview.net")
 
     notes: List[dict] = []
@@ -371,6 +373,7 @@ def fetch_papers(
         )
 
     papers = [normalize_note(n) for n in notes]
+    print(f"Fetched {len(papers)} papers.", flush=True)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
@@ -423,7 +426,9 @@ def make_local_embedder(cfg: Dict[str, Any]) -> Tuple[Callable[[List[str]], np.n
     device = detect_device()
     batch_size = cfg.get("batch_size") or default_batch_size(device)
     hf_token = os.environ.get("HF_TOKEN") or None  # only needed for gated/private HF models
+    print(f"Loading embedding model '{model_name}' on device '{device}' (batch_size={batch_size})...", flush=True)
     model = SentenceTransformer(model_name, device=device, token=hf_token)
+    print(f"Model loaded on '{device}'.", flush=True)
 
     def embed(texts: List[str]) -> np.ndarray:
         return model.encode(
@@ -676,6 +681,7 @@ def run_pipeline(
 
     try:
         config = load_project_config(project_dir, global_config_path)
+        print(f"Config loaded for venue_id={config.get('venue_id')!r}.", flush=True)
 
         queries = config.get("queries") or []
         if not queries:
@@ -690,27 +696,33 @@ def run_pipeline(
                 "No papers left after applying venue_filter — check the filter terms against "
                 "the venue/venueid values actually present (see cache/papers.json)."
             )
+        print(f"{len(papers)} papers left after venue_filter.", flush=True)
 
         embedder, model_tag = get_embedder(config["embedding"])
         embeddings_cache_path = project_dir / "cache" / "embeddings.npz"
 
         paper_texts = [paper_text(p) for p in papers]
+        print(f"Embedding {len(paper_texts)} papers...", flush=True)
         paper_embeddings = embed_with_cache(
             paper_texts, model_tag, embedder, embeddings_cache_path,
             force_refresh=force_refresh_embeddings, on_progress=on_progress,
         )
+        print(f"Embedding {len(queries)} queries...", flush=True)
         query_embeddings = embed_with_cache(
             queries, model_tag, embedder, embeddings_cache_path,
             force_refresh=force_refresh_embeddings, on_progress=on_progress,
         )
 
+        print("Computing rankings...", flush=True)
         write_status(project_dir, state="running", phase="ranking", current=0, total=1)
         rankings = compute_rankings(papers, paper_embeddings, queries, query_embeddings, config["tiers"])
         output_data = build_output_data(papers, rankings, queries, config, model_tag)
         write_json(project_dir / "output" / "rankings.json", output_data)
 
+        print("Done.", flush=True)
         write_status(project_dir, state="done", phase="done", current=1, total=1, error=None)
     except Exception as e:
+        print(f"ERROR: {e}\n{traceback.format_exc()}", flush=True)
         write_status(
             project_dir, state="error", error=f"{e}\n{traceback.format_exc(limit=3)}"
         )
@@ -737,6 +749,8 @@ def main():
         )
     except Exception as e:
         print(f"Pipeline failed: {e}", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
         sys.exit(1)
 
     print("Done.")

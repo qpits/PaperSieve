@@ -3,23 +3,97 @@
 {% block content %}
   <span class="drawer-label">CARD CATALOG · PROJECT</span>
   <h1>{{ config.venue_id or slug }}</h1>
-  <p class="subtitle">
-    <a href="{{ url_for('project_config', slug=slug) }}">edit config</a>
-  </p>
+  <p class="subtitle"><a href="#" id="toggleConfig">edit config</a></p>
 
-  <div class="controls">
-    <form id="runForm" data-slug="{{ slug }}" class="run-form">
-      <label class="checkbox"><input type="checkbox" name="force_refresh_papers"> refetch papers</label>
-      <label class="checkbox"><input type="checkbox" name="force_refresh_embeddings"> re-embed all</label>
-      <button type="submit" id="runButton">Run</button>
+  <div id="configSection" {% if show_results or status.state == 'running' %}hidden{% endif %}>
+    <form id="configForm" class="form">
+      <h2>Queries</h2>
+      <label>Queries (one per line)
+        <textarea name="queries" rows="6">{{ config.queries|join('\n') }}</textarea>
+      </label>
+
+      <h2>Venue filter</h2>
+      <label>Venue filter (one term per line, matches OpenReview's "venue" tabs)
+        <textarea name="venue_filter" rows="3" placeholder="accepted&#10;oral&#10;poster&#10;spotlight">{{ config.venue_filter|join('\n') }}</textarea>
+      </label>
+      <p class="hint">
+        Case-insensitive substrings matched against each paper's OpenReview
+        <code>venue</code>/<code>venueid</code> text (e.g. "poster", "oral",
+        "spotlight", or "Rejected"/"Withdrawn" to include those). The special
+        term "accepted" matches any accepted paper regardless of exact
+        wording. Defaults to accepted-only — clear this field (save it empty)
+        to fetch everything instead. Only takes effect once the venue has
+        released decisions — before that every paper's venue field is blank.
+      </p>
+
+      <h2>Fetch</h2>
+      <label>Max papers
+        <input type="number" name="max_papers" value="{{ config.max_papers }}" min="1">
+      </label>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label>Submission invitation
+          <input type="text" name="submission_invitation" value="{{ config.submission_invitation }}">
+        </label>
+        <p class="hint">
+          The OpenReview invitation to fetch submissions from. "Submission" is
+          correct for essentially every venue; only change this if the run
+          fails to find any papers.
+        </p>
+      </details>
+
+      <h2>Embedding</h2>
+      <label>Backend
+        <select name="backend" id="backendSelect">
+          <option value="local" {% if config.embedding.backend == 'local' %}selected{% endif %}>local</option>
+          <option value="api" {% if config.embedding.backend == 'api' %}selected{% endif %}>api</option>
+        </select>
+      </label>
+      <div data-backend="local">
+        <label>Local model
+          <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
+        </label>
+      </div>
+      <div data-backend="api">
+        <label>API base URL
+          <input type="text" name="api_base_url" value="{{ config.embedding.api.base_url }}">
+        </label>
+        <label>API model
+          <input type="text" name="api_model" value="{{ config.embedding.api.model }}">
+        </label>
+        <label>API key env var
+          <input type="text" name="api_key_env" value="{{ config.embedding.api.api_key_env }}">
+        </label>
+      </div>
+
+      <h2>Tiers</h2>
+      <label>Tier method
+        <select name="tier_method">
+          <option value="percentile" {% if config.tiers.method == 'percentile' %}selected{% endif %}>percentile</option>
+          <option value="absolute" {% if config.tiers.method == 'absolute' %}selected{% endif %}>absolute</option>
+        </select>
+      </label>
+      <label>Good threshold
+        <input type="number" name="good_threshold" value="{{ config.tiers.good_threshold }}">
+      </label>
+      <label>Medium threshold
+        <input type="number" name="medium_threshold" value="{{ config.tiers.medium_threshold }}">
+      </label>
+      <p class="hint">Changing the embedding model or queries only re-embeds what's new — existing embeddings stay cached.</p>
+
+      <label class="checkbox"><input type="checkbox" name="force_refresh_papers" value="1"> refetch papers</label>
+      <label class="checkbox"><input type="checkbox" name="force_refresh_embeddings" value="1"> re-embed all</label>
+      <button type="button" id="runButton">Run</button>
     </form>
   </div>
+  <button type="button" id="stopButton" hidden>Stop</button>
 
   <div id="progressView" class="progress-view" hidden>
     <div class="progress-phase" id="progressPhase">starting…</div>
     <progress id="progressBar" max="1" value="0"></progress>
     <div class="progress-count" id="progressCount"></div>
     <div class="progress-error" id="progressError" hidden></div>
+    <pre class="progress-log" id="progressLog"></pre>
   </div>
 
   <div id="resultsView" hidden>
@@ -38,7 +112,7 @@
   </div>
 
   <p id="noResults" class="empty" {% if show_results %}hidden{% endif %}>
-    No results yet — click Run above.
+    No results yet — fill in the config above and click Run.
   </p>
 {% endblock %}
 {% block scripts %}

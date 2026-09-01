@@ -29,12 +29,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict
 
 import yaml
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
-from pipeline import DEFAULT_CONFIG, deep_merge, load_project_config, slugify
+from pipeline import DEFAULT_CONFIG, deep_merge, load_project_config, slugify, write_status
 
 BASE_DIR = Path(__file__).parent  # code directory: templates/, static/, pipeline.py
 
@@ -47,6 +48,13 @@ REQUIRED_ENV_KEYS = ["OPENREVIEW_USERNAME", "OPENREVIEW_PASSWORD", "OPENAI_API_K
 # truth: nothing here is independently configurable.
 PROJECTS_DIR = None
 GLOBAL_CONFIG_PATH = None
+
+# Tracks the currently-running pipeline subprocess per project slug, so
+# /status can detect a crashed process (exited without writing a terminal
+# status) and /stop can kill a running one. Waitress serves this app with
+# threads in a single process, so a plain module-level dict is safe to share
+# across requests -- no separate worker processes to coordinate across.
+RUNNING_PROCESSES: Dict[str, subprocess.Popen] = {}
 
 
 def configure_user_dir(user_dir: str) -> None:
@@ -112,12 +120,16 @@ def parse_queries(raw: str) -> list:
 
 
 # --------------------------------------------------------------------------
-# Routes: index / project creation / settings
+# Routes: index / project creation / global config
 # --------------------------------------------------------------------------
 
 @app.route("/")
 def index():
-    return render_template("index.html", projects=list_projects())
+    global_config = deep_merge(DEFAULT_CONFIG, load_yaml(GLOBAL_CONFIG_PATH))
+    env_status = {key: bool(os.environ.get(key)) for key in REQUIRED_ENV_KEYS}
+    return render_template(
+        "index.html", projects=list_projects(), config=global_config, env_status=env_status
+    )
 
 
 @app.route("/projects", methods=["POST"])
@@ -129,45 +141,41 @@ def create_project():
     (project_dir / "cache").mkdir(exist_ok=True)
     (project_dir / "output").mkdir(exist_ok=True)
 
+    # Everything else (queries, max_papers, venue_filter, embedding, tiers)
+    # is left unset here and inherited from DEFAULT_CONFIG/global_config.yaml
+    # until set on the project's own config form.
     config = {
         "venue_id": venue_id,
         "submission_invitation": request.form.get("submission_invitation", "Submission").strip() or "Submission",
-        "max_papers": int(request.form.get("max_papers") or 5000),
-        "queries": parse_queries(request.form.get("queries", "")),
     }
     save_yaml(project_dir / "config.yaml", config)
     return redirect(url_for("project_page", slug=slug))
 
 
-@app.route("/settings", methods=["GET", "POST"])
+@app.route("/settings", methods=["POST"])
 def settings():
-    if request.method == "POST":
-        config = deep_merge(DEFAULT_CONFIG, {
-            "embedding": {
-                "backend": request.form.get("backend", "local"),
-                "local": {"model": request.form.get("local_model", "").strip()},
-                "api": {
-                    "base_url": request.form.get("api_base_url", "").strip(),
-                    "model": request.form.get("api_model", "").strip(),
-                    "api_key_env": request.form.get("api_key_env", "OPENAI_API_KEY").strip(),
-                },
+    config = deep_merge(DEFAULT_CONFIG, {
+        "embedding": {
+            "backend": request.form.get("backend", "local"),
+            "local": {"model": request.form.get("local_model", "").strip()},
+            "api": {
+                "base_url": request.form.get("api_base_url", "").strip(),
+                "model": request.form.get("api_model", "").strip(),
+                "api_key_env": request.form.get("api_key_env", "OPENAI_API_KEY").strip(),
             },
-            "tiers": {
-                "method": request.form.get("tier_method", "percentile"),
-                "good_threshold": float(request.form.get("good_threshold", 80)),
-                "medium_threshold": float(request.form.get("medium_threshold", 50)),
-            },
-        })
-        # only persist the fields global_config.yaml is meant to own
-        save_yaml(GLOBAL_CONFIG_PATH, {
-            "embedding": config["embedding"],
-            "tiers": config["tiers"],
-        })
-        return redirect(url_for("settings"))
-
-    global_config = deep_merge(DEFAULT_CONFIG, load_yaml(GLOBAL_CONFIG_PATH))
-    env_status = {key: bool(__import__("os").environ.get(key)) for key in REQUIRED_ENV_KEYS}
-    return render_template("settings.html", config=global_config, env_status=env_status)
+        },
+        "tiers": {
+            "method": request.form.get("tier_method", "percentile"),
+            "good_threshold": float(request.form.get("good_threshold", 80)),
+            "medium_threshold": float(request.form.get("medium_threshold", 50)),
+        },
+    })
+    # only persist the fields global_config.yaml is meant to own
+    save_yaml(GLOBAL_CONFIG_PATH, {
+        "embedding": config["embedding"],
+        "tiers": config["tiers"],
+    })
+    return redirect(url_for("index"))
 
 
 # --------------------------------------------------------------------------
@@ -179,7 +187,7 @@ def project_page(slug):
     project_dir = PROJECTS_DIR / slug
     if not project_dir.is_dir():
         return "Project not found", 404
-    config = load_yaml(project_dir / "config.yaml")
+    config = load_project_config(project_dir, GLOBAL_CONFIG_PATH)
     status = read_status(project_dir)
     has_results = (project_dir / "output" / "rankings.json").exists()
     show_results = has_results and status.get("state") != "running"
@@ -201,6 +209,11 @@ def run_project(slug):
     force_papers = request.form.get("force_refresh_papers") == "1"
     force_embeddings = request.form.get("force_refresh_embeddings") == "1"
 
+    # Write the initial status synchronously, before the subprocess even
+    # spawns, so the first /status poll never sees a stale prior run's
+    # status while the child is still importing its dependencies.
+    write_status(project_dir, state="running", phase="starting", current=0, total=0, error=None)
+
     cmd = [sys.executable, str(BASE_DIR / "pipeline.py"), "--project", str(project_dir),
            "--global-config", str(GLOBAL_CONFIG_PATH)]
     if force_papers:
@@ -208,7 +221,10 @@ def run_project(slug):
     if force_embeddings:
         cmd.append("--force-refresh-embeddings")
 
-    subprocess.Popen(cmd, cwd=str(BASE_DIR))
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    with open(project_dir / "run.log", "w", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(cmd, cwd=str(BASE_DIR), stdout=log_file, stderr=subprocess.STDOUT, env=env)
+    RUNNING_PROCESSES[slug] = proc
     return jsonify({"started": True}), 202
 
 
@@ -217,7 +233,39 @@ def project_status(slug):
     project_dir = PROJECTS_DIR / slug
     if not project_dir.is_dir():
         return "Project not found", 404
-    return jsonify(read_status(project_dir))
+
+    proc = RUNNING_PROCESSES.get(slug)
+    if proc is not None and proc.poll() is not None:
+        # subprocess has exited -- if it never wrote a terminal status, it
+        # crashed (e.g. segfault/OOM-kill) rather than failing cleanly.
+        status = read_status(project_dir)
+        if status.get("state") == "running":
+            write_status(
+                project_dir, state="error",
+                error=f"pipeline process exited unexpectedly (code {proc.returncode}) — see log below",
+            )
+        RUNNING_PROCESSES.pop(slug, None)
+
+    status = read_status(project_dir)
+    log_path = project_dir / "run.log"
+    if log_path.exists():
+        status["log"] = log_path.read_text(encoding="utf-8", errors="replace")
+    return jsonify(status)
+
+
+@app.route("/project/<slug>/stop", methods=["POST"])
+def stop_project(slug):
+    project_dir = PROJECTS_DIR / slug
+    if not project_dir.is_dir():
+        return "Project not found", 404
+
+    proc = RUNNING_PROCESSES.pop(slug, None)
+    if proc is None or proc.poll() is not None:
+        return jsonify({"stopped": False, "reason": "not running"}), 409
+
+    proc.terminate()
+    write_status(project_dir, state="error", error="Stopped by user")
+    return jsonify({"stopped": True})
 
 
 @app.route("/project/<slug>/data")
@@ -229,33 +277,34 @@ def project_data(slug):
     return app.response_class(data_path.read_bytes(), mimetype="application/json")
 
 
-@app.route("/project/<slug>/config", methods=["GET", "POST"])
+@app.route("/project/<slug>/config", methods=["POST"])
 def project_config(slug):
     project_dir = PROJECTS_DIR / slug
     if not project_dir.is_dir():
         return "Project not found", 404
     config_path = project_dir / "config.yaml"
 
-    if request.method == "POST":
-        config = load_yaml(config_path)
-        config["queries"] = parse_queries(request.form.get("queries", ""))
-        config["max_papers"] = int(request.form.get("max_papers") or config.get("max_papers", 5000))
-        config["venue_filter"] = parse_queries(request.form.get("venue_filter", ""))
-        config["embedding"] = deep_merge(config.get("embedding", {}), {
-            "backend": request.form.get("backend", "local"),
-            "local": {"model": request.form.get("local_model", "").strip()},
-        })
-        config["tiers"] = {
-            "method": request.form.get("tier_method", "percentile"),
-            "good_threshold": float(request.form.get("good_threshold", 80)),
-            "medium_threshold": float(request.form.get("medium_threshold", 50)),
-        }
-        save_yaml(config_path, config)
-        return redirect(url_for("project_page", slug=slug))
-
-    config = load_project_config(project_dir, GLOBAL_CONFIG_PATH)
-    local_config = load_yaml(config_path)
-    return render_template("project_config.html", slug=slug, config=config, local_config=local_config)
+    config = load_yaml(config_path)
+    config["submission_invitation"] = request.form.get("submission_invitation", "Submission").strip() or "Submission"
+    config["queries"] = parse_queries(request.form.get("queries", ""))
+    config["max_papers"] = int(request.form.get("max_papers") or config.get("max_papers", 30000))
+    config["venue_filter"] = parse_queries(request.form.get("venue_filter", ""))
+    config["embedding"] = deep_merge(config.get("embedding", {}), {
+        "backend": request.form.get("backend", "local"),
+        "local": {"model": request.form.get("local_model", "").strip()},
+        "api": {
+            "base_url": request.form.get("api_base_url", "").strip(),
+            "model": request.form.get("api_model", "").strip(),
+            "api_key_env": request.form.get("api_key_env", "OPENAI_API_KEY").strip(),
+        },
+    })
+    config["tiers"] = {
+        "method": request.form.get("tier_method", "percentile"),
+        "good_threshold": float(request.form.get("good_threshold", 80)),
+        "medium_threshold": float(request.form.get("medium_threshold", 50)),
+    }
+    save_yaml(config_path, config)
+    return redirect(url_for("project_page", slug=slug))
 
 
 if __name__ == "__main__":
