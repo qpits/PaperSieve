@@ -2,7 +2,8 @@
 """
 app.py — PaperSieve web UI.
 
-Manages multiple OpenReview ranking projects side by side. Each project's
+Manages multiple paper-ranking projects side by side, one per venue (see
+sources.py for the supported venue hosts). Each project's
 fetch -> embed -> rank pipeline (pipeline.py) is run as a subprocess so the
 Flask process itself stays responsive for progress polling.
 
@@ -36,6 +37,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 from pipeline import DEFAULT_CONFIG, deep_merge, load_project_config, slugify, write_status
+from sources import DEFAULT_SOURCE, SOURCES, get_source
 
 BASE_DIR = Path(__file__).parent  # code directory: templates/, static/, pipeline.py
 
@@ -109,6 +111,7 @@ def list_projects() -> list:
         projects.append({
             "slug": project_dir.name,
             "venue_id": config.get("venue_id", project_dir.name),
+            "source": config.get("source", DEFAULT_SOURCE),
             "status": status.get("state", "idle"),
             "has_results": has_results,
         })
@@ -128,13 +131,18 @@ def index():
     global_config = deep_merge(DEFAULT_CONFIG, load_yaml(GLOBAL_CONFIG_PATH))
     env_status = {key: bool(os.environ.get(key)) for key in REQUIRED_ENV_KEYS}
     return render_template(
-        "index.html", projects=list_projects(), config=global_config, env_status=env_status
+        "index.html", projects=list_projects(), config=global_config,
+        env_status=env_status, sources=list(SOURCES.values()), default_source=DEFAULT_SOURCE,
     )
 
 
 @app.route("/projects", methods=["POST"])
 def create_project():
     venue_id = request.form["venue_id"].strip()
+    source_name = request.form.get("source", DEFAULT_SOURCE)
+    if source_name not in SOURCES:
+        return f"Unknown source: {source_name}", 400
+    source = SOURCES[source_name]
     slug = slugify(venue_id)
     project_dir = PROJECTS_DIR / slug
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -144,10 +152,11 @@ def create_project():
     # Everything else (queries, max_papers, venue_filter, embedding, tiers)
     # is left unset here and inherited from DEFAULT_CONFIG/global_config.yaml
     # until set on the project's own config form.
-    config = {
-        "venue_id": venue_id,
-        "submission_invitation": request.form.get("submission_invitation", "Submission").strip() or "Submission",
-    }
+    config = {"source": source_name, "venue_id": venue_id}
+    if "submission_invitation" in source.uses:
+        config["submission_invitation"] = (
+            request.form.get("submission_invitation", "Submission").strip() or "Submission"
+        )
     save_yaml(project_dir / "config.yaml", config)
     return redirect(url_for("project_page", slug=slug))
 
@@ -197,6 +206,7 @@ def project_page(slug):
         config=config,
         status=status,
         show_results=show_results,
+        source=get_source(config.get("source")),
     )
 
 
@@ -285,10 +295,16 @@ def project_config(slug):
     config_path = project_dir / "config.yaml"
 
     config = load_yaml(config_path)
-    config["submission_invitation"] = request.form.get("submission_invitation", "Submission").strip() or "Submission"
+    # `source` is fixed at creation time -- the form never posts it back.
+    source = get_source(config.get("source"))
     config["queries"] = parse_queries(request.form.get("queries", ""))
     config["max_papers"] = int(request.form.get("max_papers") or config.get("max_papers", 30000))
-    config["venue_filter"] = parse_queries(request.form.get("venue_filter", ""))
+    if "submission_invitation" in source.uses:
+        config["submission_invitation"] = (
+            request.form.get("submission_invitation", "Submission").strip() or "Submission"
+        )
+    if "venue_filter" in source.uses:
+        config["venue_filter"] = parse_queries(request.form.get("venue_filter", ""))
     config["embedding"] = deep_merge(config.get("embedding", {}), {
         "backend": request.form.get("backend", "local"),
         "local": {"model": request.form.get("local_model", "").strip()},

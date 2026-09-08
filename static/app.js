@@ -16,6 +16,27 @@ const PaperSieve = (function () {
     };
   }
 
+  function initNewProjectForm() {
+    const sourceSelect = document.getElementById("sourceSelect");
+    const venueIdLabel = document.getElementById("venueIdLabel");
+    const venueIdInput = document.getElementById("venueIdInput");
+    if (!sourceSelect) return;
+
+    function updateSourceFields() {
+      const source = sourceSelect.value;
+      document.querySelectorAll("[data-source]").forEach((el) => {
+        el.hidden = el.dataset.source !== source;
+      });
+      const hint = document.querySelector(`.hint[data-source="${source}"]`);
+      if (hint) {
+        venueIdLabel.textContent = hint.dataset.idLabel;
+        venueIdInput.placeholder = hint.dataset.idPlaceholder;
+      }
+    }
+    sourceSelect.addEventListener("change", updateSourceFields);
+    updateSourceFields();
+  }
+
   function initProjectPage({ slug, initialStatus, showResults }) {
     const configSection = document.getElementById("configSection");
     const configForm = document.getElementById("configForm");
@@ -263,5 +284,5 @@ const PaperSieve = (function () {
     }
   }
 
-  return { initProjectPage };
+  return { initProjectPage, initNewProjectForm };
 })();

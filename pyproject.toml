@@ -3,12 +3,12 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["app", "pipeline"]
+py-modules = ["app", "pipeline", "sources"]
 
 [project]
 name = "papersieve"
 version = "0.1.0"
-description = "Fetch, embed, and rank OpenReview submissions against your own queries."
+description = "Fetch, embed, and rank conference papers against your own queries."
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",

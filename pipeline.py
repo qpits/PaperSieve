@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import openreview
 import requests
+
+from sources import ProgressCallback, get_source
 
 try:
     import yaml
@@ -30,14 +31,16 @@ except ImportError:
     yaml = None
 
 
-ProgressCallback = Callable[[str, int, Optional[int]], None]
-
 
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
 
 DEFAULT_CONFIG: Dict[str, Any] = {
+    # Which adapter in sources.py fetches this project's papers. Projects
+    # created before sources existed have no `source` key and default to
+    # OpenReview, exactly as they behaved before.
+    "source": "openreview",
     "venue_id": "",
     "submission_invitation": "Submission",
     "max_papers": 30000,
@@ -131,170 +134,8 @@ def make_status_callback(project_dir: Path) -> ProgressCallback:
 
 
 # --------------------------------------------------------------------------
-# OpenReview fetching
+# Fetching (delegated to the per-source adapters in sources.py)
 # --------------------------------------------------------------------------
-
-def get_field(content: dict, keys: List[str]) -> Any:
-    for k in keys:
-        if k in content and content[k] is not None:
-            v = content[k]
-            if isinstance(v, dict) and "value" in v:
-                return v["value"]
-            return v
-    return None
-
-
-def make_openreview_client(base_url: str):
-    # openreview-py reads OPENREVIEW_USERNAME / OPENREVIEW_PASSWORD from the
-    # environment itself (see openreview.api.OpenReviewClient.__init__) and
-    # logs in automatically if they're set; anonymous access is used
-    # otherwise. As of 2026, OpenReview's /notes endpoint returns a 403
-    # "ChallengeRequiredError" bot-detection wall for fully anonymous
-    # requests, so a logged-in account is effectively required.
-    client_cls = openreview.api.OpenReviewClient if base_url == "https://api2.openreview.net" else openreview.Client
-    return client_cls(baseurl=base_url)
-
-
-def fetch_notes_page(client, invitation: str, limit: int, offset: int,
-                      content: Optional[dict] = None, max_retries: int = 5) -> list:
-    backoff = 2.0
-    for attempt in range(max_retries + 1):
-        try:
-            return client.get_notes(invitation=invitation, limit=limit, offset=offset, content=content)
-        except openreview.OpenReviewException as e:
-            details = e.args[0] if e.args else {}
-            status = details.get("status") if isinstance(details, dict) else None
-            if status == 429 and attempt < max_retries:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            raise RuntimeError(f"OpenReview error for invitation {invitation!r}: {details}") from e
-
-
-def fetch_total_count(client, invitation: str, content: Optional[dict] = None, max_retries: int = 5) -> Optional[int]:
-    """Best-effort: OpenReview can report the total match count for an
-    invitation up front (via with_count=True, only when offset is omitted).
-    Used to make the fetch progress bar accurate instead of just tracking
-    towards max_papers. Returns None if this isn't available for some reason
-    -- callers should fall back to an indeterminate progress indicator."""
-    backoff = 2.0
-    for attempt in range(max_retries + 1):
-        try:
-            result = client.get_notes(invitation=invitation, limit=1, content=content, with_count=True)
-            return result[1] if isinstance(result, tuple) else None
-        except openreview.OpenReviewException as e:
-            details = e.args[0] if e.args else {}
-            status = details.get("status") if isinstance(details, dict) else None
-            if status == 429 and attempt < max_retries:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            return None
-
-
-def fetch_all_notes(client, invitation: str, cap: int, on_progress: Optional[ProgressCallback] = None,
-                     content: Optional[dict] = None) -> List[dict]:
-    total_count = fetch_total_count(client, invitation, content=content)
-    total_for_progress = min(total_count, cap) if total_count is not None else None
-
-    limit = 1000
-    offset = 0
-    all_notes: List[dict] = []
-    while True:
-        notes = fetch_notes_page(client, invitation, limit, offset, content=content)
-        batch = [n.to_json() for n in notes]
-        all_notes.extend(batch)
-        if on_progress:
-            on_progress("fetching", min(len(all_notes), cap), total_for_progress)
-        if len(batch) < limit or len(all_notes) >= cap:
-            break
-        offset += limit
-    return all_notes[:cap]
-
-
-def discover_venue_decision_ids(client, venue_id: str) -> Dict[str, str]:
-    """Best-effort: OpenReview venues expose their decision-outcome venueids
-    (e.g. accepted/oral/poster/withdrawn/desk-rejected) as content fields
-    ending in "_venue_id" on the venue's own Group entity -- populated from
-    the venue's request-form settings. Returns {field_name: venueid_value};
-    empty if the group isn't reachable or hasn't got any (e.g. decisions not
-    released yet)."""
-    try:
-        group = client.get_group(venue_id)
-    except Exception:
-        return {}
-    content = group.content or {}
-    venue_ids = {}
-    for key, val in content.items():
-        if not key.endswith("_venue_id"):
-            continue
-        value = val.get("value") if isinstance(val, dict) else val
-        if isinstance(value, str) and value:
-            venue_ids[key] = value
-    # Accepted papers (oral/poster/spotlight etc.) generally aren't split
-    # into their own venueid -- they just keep venueid == venue_id itself,
-    # distinguished only by the free-text "venue" field. Add it as a
-    # synthetic "accepted" candidate so venue_filter: ["accepted"] can still
-    # be resolved server-side (excluding rejected/withdrawn/desk-rejected),
-    # even though the oral/poster/spotlight split still needs a client-side
-    # match against "venue" after fetching.
-    if "accepted_venue_id" not in venue_ids:
-        venue_ids["accepted_venue_id"] = venue_id
-    return venue_ids
-
-
-def match_filtered_venue_ids(venue_id_map: Dict[str, str], venue_filter: List[str]) -> List[str]:
-    """Match venue_filter terms (case-insensitive substrings) against both
-    the decision field name (e.g. "poster_venue_id") and its venueid value
-    (e.g. "ICLR.cc/2024/Conference/Poster"), so a filter term like "poster"
-    matches regardless of which one it happens to appear in."""
-    matched = []
-    for key, value in venue_id_map.items():
-        hay = f"{key} {value}".lower()
-        if any(term.lower() in hay for term in venue_filter):
-            matched.append(value)
-    return matched
-
-
-def normalize_note(note: dict) -> dict:
-    content = note.get("content", {}) or {}
-    authors = get_field(content, ["authors"]) or []
-    if not isinstance(authors, list):
-        authors = [authors]
-    keywords = get_field(content, ["keywords"]) or []
-    if not isinstance(keywords, list):
-        keywords = [keywords]
-    forum_id = note.get("forum") or note.get("id")
-    return {
-        "id": note.get("id"),
-        "number": note.get("number"),
-        "title": get_field(content, ["title"]) or "(untitled)",
-        "abstract": get_field(content, ["abstract"]) or "",
-        "tldr": get_field(content, ["TLDR", "tldr", "TL;DR"]) or "",
-        "keywords": keywords,
-        "authors": authors,
-        "primary_area": get_field(content, ["primary_area"]) or "",
-        "venue": get_field(content, ["venue"]) or "",
-        "venueid": get_field(content, ["venueid"]) or "",
-        "forum_url": f"https://openreview.net/forum?id={forum_id}",
-    }
-
-
-def matches_venue_filter(paper: dict, venue_filter: List[str], venue_id: Optional[str] = None) -> bool:
-    if not venue_filter:
-        return True
-    hay = f"{paper.get('venue', '')} {paper.get('venueid', '')}".lower()
-    for term in venue_filter:
-        term_l = term.lower()
-        if term_l in hay:
-            return True
-        # mirror discover_venue_decision_ids()'s synthetic "accepted" meaning:
-        # accepted papers keep venueid == venue_id itself, with no "accepted"
-        # substring anywhere in their venue/venueid text.
-        if term_l == "accepted" and venue_id and paper.get("venueid") == venue_id:
-            return True
-    return False
-
 
 def fetch_papers(
     config: Dict[str, Any],
@@ -304,82 +145,48 @@ def fetch_papers(
 ) -> List[dict]:
     cache_path = project_dir / "cache" / "papers.json"
     meta_path = project_dir / "cache" / "fetch_meta.json"
-    venue_filter = config.get("venue_filter") or []
+    source = get_source(config.get("source"))
 
-    # cache is keyed by venue_filter too: if it changed since the last fetch
-    # (server-side filtering means the cache may not contain everything
-    # anymore), refetch automatically even without --force-refresh-papers.
-    cached_filter = None
+    # The cache is keyed on whatever the source says a refetch depends on
+    # (for OpenReview that's venue_filter, since it's resolved server-side and
+    # a changed filter may need a different subset), plus the source/venue
+    # themselves. If any of it changed since the last fetch, refetch even
+    # without --force-refresh-papers.
+    fetch_meta = {
+        "source": source.name,
+        "venue_id": config.get("venue_id"),
+        "key": source.cache_key(config),
+    }
+    cached_meta = None
     if meta_path.exists():
         try:
-            cached_filter = json.loads(meta_path.read_text(encoding="utf-8")).get("venue_filter")
+            cached_meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            cached_filter = None
+            cached_meta = None
 
-    if not force_refresh and cache_path.exists() and cached_filter == venue_filter:
-        print("Using cached papers (venue_filter unchanged).", flush=True)
+    if isinstance(cached_meta, dict) and "source" not in cached_meta:
+        # Pre-sources format: {"venue_filter": [...]}. Those projects were all
+        # OpenReview, and a project's venue_id never changes, so this says the
+        # same thing in the current shape -- no need to refetch over a rename.
+        cached_meta = {
+            "source": "openreview",
+            "venue_id": config.get("venue_id"),
+            "key": cached_meta.get("venue_filter"),
+        }
+
+    if not force_refresh and cache_path.exists() and cached_meta == fetch_meta:
+        print("Using cached papers (source and fetch settings unchanged).", flush=True)
         with open(cache_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    venue_id = config["venue_id"]
-    if not venue_id:
-        raise ValueError("config.venue_id is required")
-    inv_type = config["submission_invitation"]
-    cap = config["max_papers"]
-    invitation = f"{venue_id}/-/{inv_type}"
-
-    print(f"Authenticating with OpenReview and fetching '{invitation}' (venue_filter={venue_filter})...", flush=True)
-    v2_client = make_openreview_client("https://api2.openreview.net")
-
-    notes: List[dict] = []
-    if venue_filter:
-        # pre-check: only request the decision-outcome subsets that match
-        # venue_filter (e.g. "poster", "oral"), instead of pulling every
-        # submission (including rejected/withdrawn) and filtering after.
-        venue_id_map = discover_venue_decision_ids(v2_client, venue_id)
-        matched_ids = match_filtered_venue_ids(venue_id_map, venue_filter)
-        if matched_ids:
-            seen_ids = set()
-            for decision_venueid in matched_ids:
-                batch = fetch_all_notes(
-                    v2_client, invitation, cap, on_progress, content={"venueid": decision_venueid}
-                )
-                for n in batch:
-                    if n.get("id") not in seen_ids:
-                        seen_ids.add(n.get("id"))
-                        notes.append(n)
-                if len(notes) >= cap:
-                    break
-            notes = notes[:cap]
-        # if the venue group isn't reachable yet or has no matching decision
-        # ids (e.g. decisions not released), fall through to the full fetch
-        # below and let matches_venue_filter() filter client-side instead.
-
-    if not notes:
-        notes = fetch_all_notes(v2_client, invitation, cap, on_progress)
-
-    if not notes:
-        v1_client = make_openreview_client("https://api.openreview.net")
-        notes = fetch_all_notes(v1_client, invitation, cap, on_progress)
-
-    if not notes and inv_type == "Submission":
-        v1_client = make_openreview_client("https://api.openreview.net")
-        alt_invitation = f"{venue_id}/-/Blind_Submission"
-        notes = fetch_all_notes(v1_client, alt_invitation, cap, on_progress)
-
-    if not notes:
-        raise RuntimeError(
-            "No papers found. Double-check venue_id and submission_invitation in the config."
-        )
-
-    papers = [normalize_note(n) for n in notes]
-    print(f"Fetched {len(papers)} papers.", flush=True)
+    papers = source.fetch(config, on_progress)
+    print(f"Fetched {len(papers)} papers from {source.label}.", flush=True)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(papers, f)
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"venue_filter": venue_filter}, f)
+        json.dump(fetch_meta, f)
 
     return papers
 
@@ -651,6 +458,7 @@ def build_output_data(
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": config.get("source", "openreview"),
         "venue_id": config["venue_id"],
         "queries": queries,
         "embedding_model": model_tag,
@@ -689,15 +497,6 @@ def run_pipeline(
 
         papers = fetch_papers(config, project_dir, force_refresh=force_refresh_papers, on_progress=on_progress)
 
-        venue_filter = config.get("venue_filter") or []
-        papers = [paper for paper in papers if matches_venue_filter(paper, venue_filter, config.get("venue_id"))]
-        if not papers:
-            raise RuntimeError(
-                "No papers left after applying venue_filter — check the filter terms against "
-                "the venue/venueid values actually present (see cache/papers.json)."
-            )
-        print(f"{len(papers)} papers left after venue_filter.", flush=True)
-
         embedder, model_tag = get_embedder(config["embedding"])
         embeddings_cache_path = project_dir / "cache" / "embeddings.npz"
 
@@ -730,7 +529,7 @@ def run_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch, embed, and rank OpenReview papers for one project.")
+    parser = argparse.ArgumentParser(description="Fetch, embed, and rank a venue's papers for one project.")
     parser.add_argument("--project", required=True, help="Path to a project directory (containing config.yaml).")
     parser.add_argument("--global-config", default=None, help="Path to global_config.yaml (defaults merged under project config).")
     parser.add_argument("--force-refresh-papers", action="store_true")
@@ -750,7 +549,6 @@ def main():
     except Exception as e:
         print(f"Pipeline failed: {e}", file=sys.stderr)
         traceback.print_exc()
-        sys.exit(1)
         sys.exit(1)
 
     print("Done.")

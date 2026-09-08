@@ -1,12 +1,13 @@
 # PaperSieve
 
-Fetches every submission from an OpenReview venue, ranks them against your
-own search queries using embeddings, and gives you a browsable results page
+Fetches every paper from a conference venue — **OpenReview**-hosted (ICLR,
+NeurIPS, …) or **CVF**-hosted (CVPR, ICCV, WACV) — ranks them against your own
+search queries using embeddings, and gives you a browsable results page
 — nothing is filtered out, papers are just sorted into "good / medium / low"
 match tiers per query.
 
 Each venue you index is a **project** with its own folder under `projects/`,
-so you can keep ICLR, NeurIPS, etc. side by side. Fetched papers and their
+so you can keep ICLR, NeurIPS, CVPR, etc. side by side. Fetched papers and their
 embeddings are cached, so adding a query or re-running later doesn't
 recompute everything from scratch.
 
@@ -69,10 +70,9 @@ Flask's dev server with auto-reload while you're changing code — see
 
 ## Usage
 
-1. On the homepage, fill in the "New project" form: the OpenReview venue ID
-   (e.g. `ICLR.cc/2026/Conference`, taken from the venue's OpenReview URL)
-   and one or more search queries, one per line (e.g. `retrieval augmented
-   generation`).
+1. On the homepage, fill in the "New project" form: pick a **source** and
+   enter that source's venue ID (see "Sources" below). The form's hint shows
+   the expected format for whichever source is selected.
 2. You land on the project page. Click **Run**. A progress bar shows the
    fetch and embedding phases; when it's done the results appear
    automatically.
@@ -82,6 +82,48 @@ Flask's dev server with auto-reload while you're changing code — see
 4. Re-running later only fetches/embeds what's new (see caching below).
    Use the checkboxes next to Run to force a full refetch or re-embed if you
    want to bust the cache.
+
+## Sources
+
+A project's `source` is picked when you create it and never changes
+afterwards (make a second project to index the same venue elsewhere). It
+decides which fields the project's config page shows.
+
+### `openreview` — ICLR, NeurIPS, COLM, …
+
+`venue_id` is the venue's OpenReview ID, the `id=` part of its URL:
+`openreview.net/group?id=` **`ICLR.cc/2026/Conference`**.
+
+Fetches everything under the venue's `Submission` invitation, so it sees
+rejected/withdrawn papers too — `venue_filter` (below) narrows that down, and
+defaults to accepted-only. Requires OpenReview credentials in `.env`.
+
+### `cvf` — CVPR, ICCV, WACV
+
+`venue_id` is the conference's path on the CVF Open Access site:
+`openaccess.thecvf.com/` **`CVPR2025`**. The full list is at
+[openaccess.thecvf.com/menu](https://openaccess.thecvf.com/menu) — e.g.
+`CVPR2025`, `ICCV2025`, `WACV2024`, `CVPR2026_findings`. **2021 and later
+only**: earlier venues use a different, day-split URL layout, and the run
+fails with an explanatory error if you point it at one.
+
+No credentials needed. CVF publishes accepted papers only, so
+`venue_filter` and `submission_invitation` don't apply and are hidden on
+CVF project pages.
+
+CVF's listing page has no abstracts, and only about half of its entries link
+to arXiv — so abstracts are read from each paper's own CVF detail page
+instead, 8 at a time. That's the slow part of a first run: roughly two
+minutes for a ~2700-paper venue like CVPR2024, and nothing after that, since
+the result is cached like any other fetch.
+
+### Adding another source
+
+Each source is one `fetch_*(config, on_progress)` function returning the
+shared paper dict, plus one `Source(...)` entry in `SOURCES`, both in
+`sources.py`. Nothing outside that file needs to change: the forms, the
+cache-invalidation key, and the config fields a project shows are all driven
+off the `Source` struct.
 
 ## Config
 
@@ -106,24 +148,24 @@ project's own config doesn't set. Covers:
 ### `projects/<slug>/config.yaml` (`<user_dir>/projects/<slug>/config.yaml`, one per project)
 
 Created automatically when you make a new project. Holds just that
-project's specifics: `venue_id`, `submission_invitation` (usually
-`"Submission"` — see below), `max_papers` (safety cap), `queries`, and
-`venue_filter`. Anything it doesn't set (e.g. the embedding model) falls
+project's specifics: `source`, `venue_id`, `max_papers` (safety cap),
+`queries`, and — for OpenReview projects only — `submission_invitation`
+(usually `"Submission"`, see below) and `venue_filter`. Anything it doesn't set (e.g. the embedding model) falls
 back to `global_config.yaml`.
 
 `submission_invitation` and `max_papers` are tucked into the "Advanced"
 section of the project forms since they're rarely worth touching:
 `submission_invitation` is the OpenReview invitation type submissions are
 fetched under, and `"Submission"` is correct for essentially every venue —
-`fetch_papers()` already retries against older invitation names
+`fetch_openreview()` already retries against older invitation names
 (`Blind_Submission`) automatically if a venue turns out to need one, so
 there's normally nothing to configure here.
 
-#### `venue_filter` — picking a subset (the "Accepted (oral)" / "Accepted
-(poster)" tabs on OpenReview)
+#### `venue_filter` — picking a subset (OpenReview only)
 
-By default every submission under the venue's `Submission` invitation is
-fetched — accepted, rejected, withdrawn, all of it. OpenReview doesn't
+This is what corresponds to the "Accepted (oral)" / "Accepted (poster)" tabs
+on OpenReview. By default every submission under the venue's `Submission`
+invitation is fetched — accepted, rejected, withdrawn, all of it. OpenReview doesn't
 split those into separate invitations; instead, once decisions are out,
 each paper gets a `venue` string (e.g. `"ICLR 2024 poster"`, `"ICLR 2024
 spotlight"`, `"ICLR 2024 Conference Withdrawn Submission"`) and a
@@ -174,8 +216,9 @@ Holds credentials only, never shown or editable from the UI — just checked
 for presence on the Settings page. Copy `.env.example` to `<user_dir>/.env`
 and fill in:
 
-- `OPENREVIEW_USERNAME` / `OPENREVIEW_PASSWORD` — **required**, any
-  registered OpenReview account. OpenReview now blocks anonymous `/notes`
+- `OPENREVIEW_USERNAME` / `OPENREVIEW_PASSWORD` — **required for
+  `openreview` projects** (CVF needs no credentials), any registered
+  OpenReview account. OpenReview now blocks anonymous `/notes`
   requests with a bot-detection challenge, even for fully public venues, so
   fetching papers needs a logged-in session regardless of what you're
   indexing.
@@ -187,7 +230,12 @@ and fill in:
 
 ### Why re-runs are cheap
 
-Fetched papers are cached in `projects/<slug>/cache/papers.json`.
+Fetched papers are cached in `projects/<slug>/cache/papers.json`, alongside
+a `cache/fetch_meta.json` recording what that fetch depended on (source,
+venue, and for OpenReview the `venue_filter`) — if any of it changes, the
+next run refetches by itself. Projects created before sources existed have
+a `fetch_meta.json` in the older format; it's read as-is, so they keep
+their cache.
 Embeddings are cached in `projects/<slug>/cache/embeddings.npz`, keyed by a
 hash of (embedding model, text) — so adding a new query or a few new papers
 only embeds the new text, and switching embedding models naturally

@@ -3,7 +3,7 @@
 {% block content %}
   <span class="drawer-label">CARD CATALOG · PROJECT</span>
   <h1>{{ config.venue_id or slug }}</h1>
-  <p class="subtitle"><a href="#" id="toggleConfig">edit config</a></p>
+  <p class="subtitle">{{ source.label }} · <a href="#" id="toggleConfig">edit config</a></p>
 
   <div id="configSection" {% if show_results or status.state == 'running' %}hidden{% endif %}>
     <form id="configForm" class="form">
@@ -12,6 +12,7 @@
         <textarea name="queries" rows="6">{{ config.queries|join('\n') }}</textarea>
       </label>
 
+      {% if 'venue_filter' in source.uses %}
       <h2>Venue filter</h2>
       <label>Venue filter (one term per line, matches OpenReview's "venue" tabs)
         <textarea name="venue_filter" rows="3" placeholder="accepted&#10;oral&#10;poster&#10;spotlight">{{ config.venue_filter|join('\n') }}</textarea>
@@ -25,11 +26,13 @@
         to fetch everything instead. Only takes effect once the venue has
         released decisions — before that every paper's venue field is blank.
       </p>
+      {% endif %}
 
       <h2>Fetch</h2>
       <label>Max papers
         <input type="number" name="max_papers" value="{{ config.max_papers }}" min="1">
       </label>
+      {% if 'submission_invitation' in source.uses %}
       <details class="advanced">
         <summary>Advanced</summary>
         <label>Submission invitation
@@ -41,6 +44,7 @@
           fails to find any papers.
         </p>
       </details>
+      {% endif %}
 
       <h2>Embedding</h2>
       <label>Backend

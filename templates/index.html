@@ -3,13 +3,13 @@
 {% block content %}
   <span class="drawer-label">CARD CATALOG · PROJECTS</span>
   <h1>Your projects</h1>
-  <p class="subtitle">Each project is one OpenReview venue: its own cache, embeddings, and rankings.</p>
+  <p class="subtitle">Each project is one venue: its own cache, embeddings, and rankings.</p>
 
   {% if projects %}
     <div class="project-list">
       {% for p in projects %}
         <a class="project-row" href="{{ url_for('project_page', slug=p.slug) }}">
-          <span class="project-venue">{{ p.venue_id }}</span>
+          <span class="project-venue">{{ p.venue_id }}<span class="project-source">{{ p.source }}</span></span>
           <span class="project-status status-{{ p.status }}">{{ p.status }}</span>
         </a>
       {% endfor %}
@@ -20,20 +20,34 @@
 
   <h2>New project</h2>
   <form method="post" action="{{ url_for('create_project') }}" class="form">
-    <label>Venue ID
-      <input type="text" name="venue_id" placeholder="ICLR.cc/2026/Conference" required>
+    <label>Source
+      <select name="source" id="sourceSelect">
+        {% for s in sources %}
+          <option value="{{ s.name }}" {% if s.name == default_source %}selected{% endif %}>{{ s.label }}</option>
+        {% endfor %}
+      </select>
     </label>
-    <details class="advanced">
-      <summary>Advanced</summary>
-      <label>Submission invitation
-        <input type="text" name="submission_invitation" value="Submission">
-      </label>
-      <p class="hint">
-        The OpenReview invitation to fetch submissions from. "Submission" is
-        correct for essentially every venue; only change this if the run
-        fails to find any papers.
-      </p>
-    </details>
+    <label>
+      <span id="venueIdLabel"></span>
+      <input type="text" name="venue_id" id="venueIdInput" required>
+    </label>
+    {% for s in sources %}
+      <p class="hint" data-source="{{ s.name }}"
+         data-id-label="{{ s.id_label }}" data-id-placeholder="{{ s.id_placeholder }}">{{ s.id_hint|safe }}</p>
+    {% endfor %}
+    {% for s in sources if 'submission_invitation' in s.uses %}
+      <details class="advanced" data-source="{{ s.name }}">
+        <summary>Advanced</summary>
+        <label>Submission invitation
+          <input type="text" name="submission_invitation" value="Submission">
+        </label>
+        <p class="hint">
+          The OpenReview invitation to fetch submissions from. "Submission" is
+          correct for essentially every venue; only change this if the run
+          fails to find any papers.
+        </p>
+      </details>
+    {% endfor %}
     <button type="submit">Create project</button>
   </form>
   <p class="hint">Queries, embedding model, and other settings are configured on the project page after creation.</p>
@@ -84,4 +98,8 @@
       <button type="submit">Save</button>
     </form>
   </details>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>PaperSieve.initNewProjectForm();</script>
 {% endblock %}
