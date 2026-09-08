@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_config_fields.html" as fields %}
 {% block title %}PaperSieve — Projects{% endblock %}
 {% block content %}
   <span class="drawer-label">CARD CATALOG · PROJECTS</span>
@@ -65,36 +66,12 @@
     <p class="hint">Edit <code>.env</code> by hand to set these — never entered here.</p>
 
     <form method="post" action="{{ url_for('settings') }}" class="form">
-      <label>Embedding backend
-        <select name="backend">
-          <option value="local" {% if config.embedding.backend == 'local' %}selected{% endif %}>local</option>
-          <option value="api" {% if config.embedding.backend == 'api' %}selected{% endif %}>api</option>
-        </select>
-      </label>
-      <label>Local model
-        <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
-      </label>
-      <label>API base URL
-        <input type="text" name="api_base_url" value="{{ config.embedding.api.base_url }}">
-      </label>
-      <label>API model
-        <input type="text" name="api_model" value="{{ config.embedding.api.model }}">
-      </label>
-      <label>API key env var
-        <input type="text" name="api_key_env" value="{{ config.embedding.api.api_key_env }}">
-      </label>
-      <label>Tier method
-        <select name="tier_method">
-          <option value="percentile" {% if config.tiers.method == 'percentile' %}selected{% endif %}>percentile</option>
-          <option value="absolute" {% if config.tiers.method == 'absolute' %}selected{% endif %}>absolute</option>
-        </select>
-      </label>
-      <label>Good threshold
-        <input type="number" name="good_threshold" value="{{ config.tiers.good_threshold }}">
-      </label>
-      <label>Medium threshold
-        <input type="number" name="medium_threshold" value="{{ config.tiers.medium_threshold }}">
-      </label>
+      <p class="hint">
+        Written to <code>global_config.yaml</code>, which is created with these
+        defaults on first launch. Projects inherit every value here unless they
+        override it on their own config page.
+      </p>
+      {{ fields.embedding_and_tiers(config) }}
       <button type="submit">Save</button>
     </form>
   </details>

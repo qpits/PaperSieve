@@ -16,11 +16,24 @@ const PaperSieve = (function () {
     };
   }
 
+  function initBackendToggle() {
+    const backendSelect = document.getElementById("backendSelect");
+    if (!backendSelect) return;
+    function update() {
+      document.querySelectorAll("[data-backend]").forEach((el) => {
+        el.hidden = el.dataset.backend !== backendSelect.value;
+      });
+    }
+    backendSelect.addEventListener("change", update);
+    update();
+  }
+
   function initNewProjectForm() {
+    initBackendToggle();
     const sourceSelect = document.getElementById("sourceSelect");
     const venueIdLabel = document.getElementById("venueIdLabel");
     const venueIdInput = document.getElementById("venueIdInput");
-    if (!sourceSelect) return;
+    if (!sourceSelect) return;  // index page renders the settings form too
 
     function updateSourceFields() {
       const source = sourceSelect.value;
@@ -41,7 +54,6 @@ const PaperSieve = (function () {
     const configSection = document.getElementById("configSection");
     const configForm = document.getElementById("configForm");
     const toggleConfig = document.getElementById("toggleConfig");
-    const backendSelect = document.getElementById("backendSelect");
     const runButton = document.getElementById("runButton");
     const stopButton = document.getElementById("stopButton");
     const progressView = document.getElementById("progressView");
@@ -242,14 +254,17 @@ const PaperSieve = (function () {
 
     configForm.addEventListener("submit", (e) => e.preventDefault());
 
-    function updateBackendFields() {
-      const backend = backendSelect.value;
-      document.querySelectorAll("[data-backend]").forEach((el) => {
-        el.hidden = el.dataset.backend !== backend;
-      });
+    initBackendToggle();
+
+    // Purely an affordance: the fields stay editable, but dimming them shows
+    // they won't be written unless the project opts out of the globals.
+    const overrideGlobals = document.getElementById("overrideGlobals");
+    const globalFields = document.getElementById("globalFields");
+    if (overrideGlobals && globalFields) {
+      const updateOverride = () => globalFields.classList.toggle("inherited", !overrideGlobals.checked);
+      overrideGlobals.addEventListener("change", updateOverride);
+      updateOverride();
     }
-    backendSelect.addEventListener("change", updateBackendFields);
-    updateBackendFields();
 
     toggleConfig.addEventListener("click", (e) => {
       e.preventDefault();

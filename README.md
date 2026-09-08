@@ -132,14 +132,24 @@ or through the Settings/project-config pages in the UI:
 
 ### `global_config.yaml` (`<user_dir>/global_config.yaml`)
 
-Defaults shared by every project — only used to fill in whatever a
-project's own config doesn't set. Covers:
+Written out with the defaults below the first time you start the app, so
+it always exists and always matches what the Settings page shows. Projects
+inherit every value here unless they override it (see below). Covers:
 
 - `embedding.backend`: `"local"` (runs a `sentence-transformers` model on
   your machine, no API key) or `"api"` (calls an OpenAI-compatible
   embeddings endpoint).
-- `embedding.local.model` / `embedding.api.*`: which model to use for
-  whichever backend is active.
+- `embedding.local.model`: the `sentence-transformers` model name.
+- `embedding.local.batch_size`: texts encoded per forward pass. Leave empty
+  (`null`) to size it from the detected device — 64 on CUDA/MPS, 16 on CPU.
+  Lower it if you run out of GPU memory.
+- `embedding.api.base_url` / `.model`: the OpenAI-compatible endpoint and
+  the model to request from it.
+- `embedding.api.api_key_env`: which `.env` variable holds the key
+  (default `OPENAI_API_KEY`). Local servers like Ollama or vLLM usually
+  ignore it.
+- `embedding.api.batch_size`: texts per request, default 96. Lower it if
+  the provider rejects large batches.
 - `tiers`: how papers are sorted into good/medium/low. `method: percentile`
   (recommended) ranks papers relative to each other for that query;
   `good_threshold`/`medium_threshold` are the cutoff percentiles (or raw
@@ -153,8 +163,18 @@ project's specifics: `source`, `venue_id`, `max_papers` (safety cap),
 (usually `"Submission"`, see below) and `venue_filter`. Anything it doesn't set (e.g. the embedding model) falls
 back to `global_config.yaml`.
 
-`submission_invitation` and `max_papers` are tucked into the "Advanced"
-section of the project forms since they're rarely worth touching:
+Everything above appears on the project's config page; rarely-touched
+fields (`submission_invitation`, the batch sizes) sit in collapsed
+"Advanced" blocks rather than being omitted. `source` and `venue_id` are
+shown read-only, since the project folder is named after the venue ID —
+index a different venue by creating another project.
+
+The embedding and tiers sections live under **Inherited defaults**, with an
+"override these for this project" checkbox. Left unticked, the project
+follows `global_config.yaml` and picks up later edits to it; ticked, the
+values are copied into the project's own `config.yaml` and stop tracking
+the globals. Unticking again drops them and restores inheritance.
+
 `submission_invitation` is the OpenReview invitation type submissions are
 fetched under, and `"Submission"` is correct for essentially every venue —
 `fetch_openreview()` already retries against older invitation names

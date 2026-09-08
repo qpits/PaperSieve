@@ -45,6 +45,11 @@ app = Flask(__name__)
 
 REQUIRED_ENV_KEYS = ["OPENREVIEW_USERNAME", "OPENREVIEW_PASSWORD", "OPENAI_API_KEY", "HF_TOKEN"]
 
+# The config sections global_config.yaml owns. A project inherits these unless
+# it sets them itself; both forms that edit them post the identical field names
+# (see templates/_config_fields.html).
+GLOBAL_CONFIG_KEYS = ("embedding", "tiers")
+
 # Fixed relative paths under the mandatory user_dir CLI argument -- set once
 # by configure_user_dir() before any request is handled. One source of
 # truth: nothing here is independently configurable.
@@ -70,6 +75,12 @@ def configure_user_dir(user_dir: str) -> None:
     PROJECTS_DIR = path / "projects"
     GLOBAL_CONFIG_PATH = path / "global_config.yaml"
     PROJECTS_DIR.mkdir(exist_ok=True)
+    if not GLOBAL_CONFIG_PATH.exists():
+        # Write the defaults out on first launch rather than leaving the file
+        # absent until someone happens to hit Save: otherwise the Settings page
+        # shows values that exist nowhere on disk, and it isn't obvious that
+        # what a project inherits is editable at all.
+        save_yaml(GLOBAL_CONFIG_PATH, {k: DEFAULT_CONFIG[k] for k in GLOBAL_CONFIG_KEYS})
     load_dotenv(path / ".env")
 
 
@@ -122,6 +133,39 @@ def parse_queries(raw: str) -> list:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
+def parse_optional_int(raw: str, empty=None):
+    """Blank batch-size fields mean "pick one for me", not zero."""
+    raw = (raw or "").strip()
+    return int(raw) if raw else empty
+
+
+def parse_global_fields(form) -> dict:
+    """The embedding/tiers block. The global Settings form and each project's
+    override form post exactly these fields, so they parse in one place."""
+    return {
+        "embedding": {
+            "backend": form.get("backend", "local"),
+            "local": {
+                "model": form.get("local_model", "").strip(),
+                "batch_size": parse_optional_int(form.get("local_batch_size")),
+            },
+            "api": {
+                "base_url": form.get("api_base_url", "").strip(),
+                "model": form.get("api_model", "").strip(),
+                "api_key_env": form.get("api_key_env", "OPENAI_API_KEY").strip(),
+                # unlike the local backend, the API embedder has no device to
+                # auto-size against, so it always needs a concrete number
+                "batch_size": parse_optional_int(form.get("api_batch_size"), empty=96),
+            },
+        },
+        "tiers": {
+            "method": form.get("tier_method", "percentile"),
+            "good_threshold": float(form.get("good_threshold", 80)),
+            "medium_threshold": float(form.get("medium_threshold", 50)),
+        },
+    }
+
+
 # --------------------------------------------------------------------------
 # Routes: index / project creation / global config
 # --------------------------------------------------------------------------
@@ -163,27 +207,9 @@ def create_project():
 
 @app.route("/settings", methods=["POST"])
 def settings():
-    config = deep_merge(DEFAULT_CONFIG, {
-        "embedding": {
-            "backend": request.form.get("backend", "local"),
-            "local": {"model": request.form.get("local_model", "").strip()},
-            "api": {
-                "base_url": request.form.get("api_base_url", "").strip(),
-                "model": request.form.get("api_model", "").strip(),
-                "api_key_env": request.form.get("api_key_env", "OPENAI_API_KEY").strip(),
-            },
-        },
-        "tiers": {
-            "method": request.form.get("tier_method", "percentile"),
-            "good_threshold": float(request.form.get("good_threshold", 80)),
-            "medium_threshold": float(request.form.get("medium_threshold", 50)),
-        },
-    })
-    # only persist the fields global_config.yaml is meant to own
-    save_yaml(GLOBAL_CONFIG_PATH, {
-        "embedding": config["embedding"],
-        "tiers": config["tiers"],
-    })
+    config = deep_merge(DEFAULT_CONFIG, parse_global_fields(request.form))
+    # only persist the sections global_config.yaml is meant to own
+    save_yaml(GLOBAL_CONFIG_PATH, {k: config[k] for k in GLOBAL_CONFIG_KEYS})
     return redirect(url_for("index"))
 
 
@@ -197,6 +223,7 @@ def project_page(slug):
     if not project_dir.is_dir():
         return "Project not found", 404
     config = load_project_config(project_dir, GLOBAL_CONFIG_PATH)
+    own_config = load_yaml(project_dir / "config.yaml")
     status = read_status(project_dir)
     has_results = (project_dir / "output" / "rankings.json").exists()
     show_results = has_results and status.get("state") != "running"
@@ -207,6 +234,7 @@ def project_page(slug):
         status=status,
         show_results=show_results,
         source=get_source(config.get("source")),
+        overrides_globals=any(k in own_config for k in GLOBAL_CONFIG_KEYS),
     )
 
 
@@ -305,20 +333,17 @@ def project_config(slug):
         )
     if "venue_filter" in source.uses:
         config["venue_filter"] = parse_queries(request.form.get("venue_filter", ""))
-    config["embedding"] = deep_merge(config.get("embedding", {}), {
-        "backend": request.form.get("backend", "local"),
-        "local": {"model": request.form.get("local_model", "").strip()},
-        "api": {
-            "base_url": request.form.get("api_base_url", "").strip(),
-            "model": request.form.get("api_model", "").strip(),
-            "api_key_env": request.form.get("api_key_env", "OPENAI_API_KEY").strip(),
-        },
-    })
-    config["tiers"] = {
-        "method": request.form.get("tier_method", "percentile"),
-        "good_threshold": float(request.form.get("good_threshold", 80)),
-        "medium_threshold": float(request.form.get("medium_threshold", 50)),
-    }
+    # Only write the global sections when this project actually overrides them
+    # -- writing them unconditionally would pin every project to whatever the
+    # globals happened to be at creation time, so later edits to
+    # global_config.yaml would never reach it again.
+    if request.form.get("override_globals") == "1":
+        overrides = parse_global_fields(request.form)
+        for key in GLOBAL_CONFIG_KEYS:
+            config[key] = deep_merge(config.get(key, {}), overrides[key])
+    else:
+        for key in GLOBAL_CONFIG_KEYS:
+            config.pop(key, None)
     save_yaml(config_path, config)
     return redirect(url_for("project_page", slug=slug))
 

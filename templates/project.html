@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_config_fields.html" as fields %}
 {% block title %}{{ config.venue_id or slug }} — PaperSieve{% endblock %}
 {% block content %}
   <span class="drawer-label">CARD CATALOG · PROJECT</span>
@@ -7,6 +8,19 @@
 
   <div id="configSection" {% if show_results or status.state == 'running' %}hidden{% endif %}>
     <form id="configForm" class="form">
+      <h2>Project</h2>
+      <label>Source
+        <input type="text" value="{{ source.label }}" disabled>
+      </label>
+      <label>{{ source.id_label }}
+        <input type="text" value="{{ config.venue_id }}" disabled>
+      </label>
+      <p class="hint">
+        Both are fixed when the project is created — the project folder is
+        named after the venue ID. To index a different venue, or the same one
+        from another source, create a new project.
+      </p>
+
       <h2>Queries</h2>
       <label>Queries (one per line)
         <textarea name="queries" rows="6">{{ config.queries|join('\n') }}</textarea>
@@ -46,43 +60,24 @@
       </details>
       {% endif %}
 
-      <h2>Embedding</h2>
-      <label>Backend
-        <select name="backend" id="backendSelect">
-          <option value="local" {% if config.embedding.backend == 'local' %}selected{% endif %}>local</option>
-          <option value="api" {% if config.embedding.backend == 'api' %}selected{% endif %}>api</option>
-        </select>
-      </label>
-      <div data-backend="local">
-        <label>Local model
-          <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
+      <h2>Inherited defaults</h2>
+      <details class="advanced" {% if overrides_globals %}open{% endif %}>
+        <summary>Embedding and tiers — {% if overrides_globals %}overridden for this project{% else %}inherited from global defaults{% endif %}</summary>
+        <label class="checkbox">
+          <input type="checkbox" name="override_globals" id="overrideGlobals" value="1"
+                 {% if overrides_globals %}checked{% endif %}>
+          override these for this project
         </label>
-      </div>
-      <div data-backend="api">
-        <label>API base URL
-          <input type="text" name="api_base_url" value="{{ config.embedding.api.base_url }}">
-        </label>
-        <label>API model
-          <input type="text" name="api_model" value="{{ config.embedding.api.model }}">
-        </label>
-        <label>API key env var
-          <input type="text" name="api_key_env" value="{{ config.embedding.api.api_key_env }}">
-        </label>
-      </div>
-
-      <h2>Tiers</h2>
-      <label>Tier method
-        <select name="tier_method">
-          <option value="percentile" {% if config.tiers.method == 'percentile' %}selected{% endif %}>percentile</option>
-          <option value="absolute" {% if config.tiers.method == 'absolute' %}selected{% endif %}>absolute</option>
-        </select>
-      </label>
-      <label>Good threshold
-        <input type="number" name="good_threshold" value="{{ config.tiers.good_threshold }}">
-      </label>
-      <label>Medium threshold
-        <input type="number" name="medium_threshold" value="{{ config.tiers.medium_threshold }}">
-      </label>
+        <p class="hint">
+          Unticked, this project follows <code>global_config.yaml</code> and
+          picks up any later change to it. Ticked, the values below are copied
+          into this project's own <code>config.yaml</code> and stop tracking the
+          globals. The values shown are the ones currently in effect either way.
+        </p>
+        <div id="globalFields">
+          {{ fields.embedding_and_tiers(config) }}
+        </div>
+      </details>
       <p class="hint">Changing the embedding model or queries only re-embeds what's new — existing embeddings stay cached.</p>
 
       <label class="checkbox"><input type="checkbox" name="force_refresh_papers" value="1"> refetch papers</label>

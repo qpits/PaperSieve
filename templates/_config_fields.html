@@ -1,0 +1,75 @@
+{# The embedding + tiers fields, shared by the global Settings form and each
+   project's override form. Both post identical field names, parsed in one
+   place by app.parse_global_fields(). Add a new global-config field here and
+   it appears on both pages at once. #}
+{% macro embedding_and_tiers(config) %}
+  <h3>Embedding</h3>
+  <label>Backend
+    <select name="backend" id="backendSelect">
+      <option value="local" {% if config.embedding.backend == 'local' %}selected{% endif %}>local</option>
+      <option value="api" {% if config.embedding.backend == 'api' %}selected{% endif %}>api</option>
+    </select>
+  </label>
+  <div data-backend="local">
+    <label>Local model
+      <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
+    </label>
+    <details class="advanced">
+      <summary>Advanced</summary>
+      <label>Batch size
+        <input type="number" name="local_batch_size" min="1"
+               value="{{ config.embedding.local.batch_size if config.embedding.local.batch_size is not none else '' }}">
+      </label>
+      <p class="hint">
+        How many texts are encoded at once. Leave empty to pick one from the
+        detected device (64 on CUDA/MPS, 16 on CPU); lower it if you run out
+        of GPU memory.
+      </p>
+    </details>
+  </div>
+  <div data-backend="api">
+    <label>API base URL
+      <input type="text" name="api_base_url" value="{{ config.embedding.api.base_url }}">
+    </label>
+    <label>API model
+      <input type="text" name="api_model" value="{{ config.embedding.api.model }}">
+    </label>
+    <label>API key env var
+      <input type="text" name="api_key_env" value="{{ config.embedding.api.api_key_env }}">
+    </label>
+    <p class="hint">
+      Which <code>.env</code> variable holds the key. Local OpenAI-compatible
+      servers (Ollama, vLLM, LM Studio) usually ignore it entirely.
+    </p>
+    <details class="advanced">
+      <summary>Advanced</summary>
+      <label>Batch size
+        <input type="number" name="api_batch_size" min="1"
+               value="{{ config.embedding.api.batch_size if config.embedding.api.batch_size is not none else '' }}">
+      </label>
+      <p class="hint">
+        Texts per request to the embeddings endpoint. Defaults to 96; lower it
+        if the provider rejects large batches.
+      </p>
+    </details>
+  </div>
+
+  <h3>Tiers</h3>
+  <label>Tier method
+    <select name="tier_method">
+      <option value="percentile" {% if config.tiers.method == 'percentile' %}selected{% endif %}>percentile</option>
+      <option value="absolute" {% if config.tiers.method == 'absolute' %}selected{% endif %}>absolute</option>
+    </select>
+  </label>
+  <label>Good threshold
+    <input type="number" name="good_threshold" step="any" value="{{ config.tiers.good_threshold }}">
+  </label>
+  <label>Medium threshold
+    <input type="number" name="medium_threshold" step="any" value="{{ config.tiers.medium_threshold }}">
+  </label>
+  <p class="hint">
+    With <code>percentile</code> these are percentile cutoffs (0-100) among
+    that query's own results; with <code>absolute</code> they're raw cosine
+    similarity scores (roughly 0-1).
+  </p>
+{% endmacro %}
