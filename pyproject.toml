@@ -22,8 +22,91 @@ dependencies = [
 
 [project.optional-dependencies]
 # Only needed for embedding.backend: "local" (runs a sentence-transformers
-# model on your own machine). If you only use the "api" backend, skip this
-# extra entirely and no torch/sentence-transformers download happens.
-local = [
-    "sentence-transformers>=2.6",
+# model on your own machine). If you only use the "api" backend, skip these
+# entirely and no torch/sentence-transformers download happens.
+#
+# `local` alone assumes torch is already installed and leaves it alone. The
+# accelerator extras below each pin torch to a matching wheel index -- see
+# [tool.uv.sources]. They are mutually exclusive (see [tool.uv] conflicts);
+# pick exactly one, e.g. `uv sync --extra cu130`.
+local = ["sentence-transformers>=3.2"]
+
+cpu = ["papersieve[local]", "torch>=2.14"]
+# CUDA: cu128 for older drivers (that index stops at torch 2.11), cu130 otherwise.
+cu128 = ["papersieve[local]", "torch>=2.9,<2.12"]
+cu130 = ["papersieve[local]", "torch>=2.14"]
+# ROCm wheels are Linux-only; the triton pin is what torch itself requires.
+rocm = [
+    "papersieve[local]",
+    "torch>=2.14",
+    "triton-rocm>=3.8; sys_platform == 'linux'",
 ]
+xpu = [
+    "papersieve[local]",
+    "torch>=2.14",
+    "triton-xpu>=3.8; sys_platform != 'darwin'",
+]
+# macOS arm64: the plain PyPI wheel is the MPS build, so no index override.
+mps = ["papersieve[local]", "torch>=2.14"]
+
+# Alternative inference runtimes, selected at runtime by
+# embedding.local.runtime. These are *additions* to one of the extras above
+# (sentence-transformers always requires torch), and the cheap combination is
+# a CPU torch build plus one of these: `uv sync --extra cpu --extra onnx-gpu`.
+onnx = ["sentence-transformers[onnx]>=3.2"]
+onnx-gpu = ["sentence-transformers[onnx-gpu]>=3.2"]
+openvino = ["sentence-transformers[openvino]>=3.2"]
+
+[tool.uv]
+# One torch build per environment -- uv resolves each of these separately
+# instead of failing on the conflicting torch pins.
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu128" },
+        { extra = "cu130" },
+        { extra = "rocm" },
+        { extra = "xpu" },
+        { extra = "mps" },
+    ],
+]
+
+# `explicit = true` keeps these indexes from serving anything except the
+# packages routed to them in [tool.uv.sources] below.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+# torch's own metadata requires the matching triton package, which only exists
+# on these indexes -- routing torch alone would fail to resolve.
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
+triton-xpu = [{ index = "pytorch-xpu", extra = "xpu" }]

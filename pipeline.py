@@ -58,7 +58,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "backend": "local",  # "local" or "api"
         "local": {
             "model": "sentence-transformers/all-mpnet-base-v2",
-            "batch_size": None,  # None -> auto-picked from detected device
+            # Which inference runtime sentence-transformers loads the model
+            # with. "torch" needs nothing extra; "onnx"/"openvino" need the
+            # matching extra installed (see pyproject.toml).
+            "runtime": "torch",  # "torch", "onnx" or "openvino"
+            # "auto" detects; see resolve_device() for what each runtime accepts.
+            "device": "auto",
+            "batch_size": None,  # None -> auto-picked from the device
         },
         "api": {
             "base_url": "https://api.openai.com/v1",
@@ -199,7 +205,10 @@ def detect_device() -> str:
     try:
         import torch
         if torch.cuda.is_available():
+            # ROCm builds answer here too -- their device string is "cuda".
             return "cuda"
+        if getattr(torch, "xpu", None) is not None and torch.xpu.is_available():
+            return "xpu"
         if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
             return "mps"
     except ImportError:
@@ -208,7 +217,71 @@ def detect_device() -> str:
 
 
 def default_batch_size(device: str) -> int:
-    return {"cuda": 64, "mps": 64, "cpu": 16}.get(device, 16)
+    # device may be "cuda:0"; only the family matters here.
+    family = device.split(":")[0]
+    return {"cuda": 64, "rocm": 64, "xpu": 64, "mps": 64}.get(family, 16)
+
+
+RUNTIMES = ("torch", "onnx", "openvino")
+
+# What each runtime calls the accelerator. torch takes a device string; the
+# other two take their target as a model kwarg and leave torch on the CPU
+# (it only holds the tokenized batch). One table each, so resolve_device()
+# below stays a lookup rather than a pile of branches.
+TORCH_DEVICES = ("auto", "cpu", "cuda", "mps", "xpu")
+
+# ponytail: "npu" is accepted but OpenVINO's NPU compiler requires static
+# shapes, while sentence-transformer encoders tokenize to variable lengths --
+# expect it to fail on most models. Lifting that means exporting the model
+# with a fixed sequence length first.
+OPENVINO_DEVICES = {"auto": "AUTO", "cpu": "CPU", "xpu": "GPU", "npu": "NPU"}
+
+# ONNX Runtime execution providers. "auto" omits the provider so ORT picks
+# whatever the installed onnxruntime package offers. Note "rocm" is its own
+# entry here: torch calls a ROCm GPU "cuda", ORT does not.
+ONNX_PROVIDERS = {
+    "auto": None,
+    "cpu": "CPUExecutionProvider",
+    "cuda": "CUDAExecutionProvider",
+    "rocm": "ROCMExecutionProvider",
+    "mps": "CoreMLExecutionProvider",
+    "xpu": "OpenVINOExecutionProvider",
+    "npu": "OpenVINOExecutionProvider",
+}
+
+# Union of everything any runtime accepts -- what the config UI offers.
+LOCAL_DEVICES = ("auto", "cpu", "cuda", "rocm", "mps", "xpu", "npu")
+
+
+def valid_devices(runtime: str) -> Tuple[str, ...]:
+    if runtime == "torch":
+        return TORCH_DEVICES
+    if runtime == "openvino":
+        return tuple(OPENVINO_DEVICES)
+    return tuple(ONNX_PROVIDERS)
+
+
+def resolve_device(cfg: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """(torch device, extra SentenceTransformer kwargs) for a local config."""
+    runtime = cfg.get("runtime") or "torch"
+    device = cfg.get("device") or "auto"
+    if runtime not in RUNTIMES:
+        raise RuntimeError(
+            f"Unknown embedding runtime {runtime!r}. Valid: {', '.join(RUNTIMES)}."
+        )
+    allowed = valid_devices(runtime)
+    if device not in allowed:
+        raise RuntimeError(
+            f"Device {device!r} is not valid for the {runtime!r} runtime. "
+            f"Valid: {', '.join(allowed)}."
+        )
+
+    if runtime == "torch":
+        return (detect_device() if device == "auto" else device), {}
+    if runtime == "openvino":
+        return "cpu", {"device": OPENVINO_DEVICES[device]}
+    provider = ONNX_PROVIDERS[device]
+    return "cpu", ({"provider": provider} if provider else {})
 
 
 # --------------------------------------------------------------------------
@@ -230,12 +303,25 @@ def make_local_embedder(cfg: Dict[str, Any]) -> Tuple[Callable[[List[str]], np.n
         ) from e
 
     model_name = cfg["model"]
-    device = detect_device()
-    batch_size = cfg.get("batch_size") or default_batch_size(device)
+    runtime = cfg.get("runtime") or "torch"
+    device, model_kwargs = resolve_device(cfg)
+    # Size batches off the accelerator actually doing the work: for onnx and
+    # openvino that is the configured device, not the "cpu" torch sits on.
+    accel = device if runtime == "torch" else (cfg.get("device") or "auto")
+    if accel == "auto":
+        accel = detect_device()
+    batch_size = cfg.get("batch_size") or default_batch_size(accel)
     hf_token = os.environ.get("HF_TOKEN") or None  # only needed for gated/private HF models
-    print(f"Loading embedding model '{model_name}' on device '{device}' (batch_size={batch_size})...", flush=True)
-    model = SentenceTransformer(model_name, device=device, token=hf_token)
-    print(f"Model loaded on '{device}'.", flush=True)
+    # Only pass `backend`/`model_kwargs` when they'd do something -- the default
+    # path then still works on sentence-transformers older than 3.2.
+    extra = {} if runtime == "torch" else {"backend": runtime, "model_kwargs": model_kwargs}
+    print(
+        f"Loading embedding model '{model_name}' (runtime={runtime}, device={accel}, "
+        f"batch_size={batch_size})...",
+        flush=True,
+    )
+    model = SentenceTransformer(model_name, device=device, token=hf_token, **extra)
+    print(f"Model loaded (runtime={runtime}, device={accel}).", flush=True)
 
     def embed(texts: List[str]) -> np.ndarray:
         return model.encode(

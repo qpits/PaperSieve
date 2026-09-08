@@ -19,35 +19,160 @@ with it.
 
 ## Setup
 
-Dependencies are declared in `pyproject.toml`. The `local` extra (torch +
-sentence-transformers) is only needed if you'll run an embedding model on
-your own machine — skip it if you're using an API-based embedding backend
-(OpenAI, Ollama, vLLM, etc.), and no torch download happens at all.
+Dependencies are declared in `pyproject.toml`. The base install is small and
+pure-Python; everything to do with running an embedding model locally is
+optional, so if you only use the `api` embedding backend (OpenAI, Ollama,
+vLLM, …) no torch download happens at all.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate    # or: uv venv && source .venv/bin/activate
-
-# API-only (OpenAI-compatible embeddings, no local model):
-pip install .
-
-# Local embedding models (installs torch + sentence-transformers):
-pip install ".[local]"
+# API-only (OpenAI-compatible embeddings, no local model)
+uv sync
 ```
 
-If you're installing the `local` extra and have a GPU, install torch
-*first*, pinned to the wheel index matching your driver's CUDA version —
-otherwise pip/uv will pull the newest torch build, which may need a newer
-driver than you have. Check your max supported CUDA version with
-`nvidia-smi` (top-right of its output), then e.g.:
+### Picking an install target
+
+To run models on your own machine you also need `torch`, and there is no
+single torch build that works everywhere — each accelerator has its own wheel
+index. PaperSieve names one **install target** per accelerator, so you pick
+your hardware instead of hand-assembling an index URL:
+
+| Your hardware | Command |
+|---|---|
+| NVIDIA GPU, current driver | `uv sync --extra cu130` |
+| NVIDIA GPU, older driver | `uv sync --extra cu128` |
+| Apple Silicon (MPS) | `uv sync --extra mps` |
+| AMD GPU (ROCm) | `uv sync --extra rocm` |
+| Intel Arc / Core Ultra (XPU) | `uv sync --extra xpu` |
+| No GPU, or unsure | `uv sync --extra cpu` |
+
+Not sure which CUDA target? Run `nvidia-smi` — the version in the **top-right**
+of its output is the newest CUDA your driver supports. 13.0 or newer takes
+`cu130`; older drivers take `cu128`, which is capped at torch 2.11.
+
+These targets are mutually exclusive — pick exactly one. They only work through
+`uv sync` (see "Installing with pip instead" below for why).
+
+> `uv sync` makes the environment match the lockfile exactly, so it will
+> **uninstall** anything already in `.venv` that isn't part of the target you
+> picked — including a torch you installed by hand earlier. Add `--inexact` to
+> leave extraneous packages alone.
+
+### Two ways to use a GPU
+
+**A. The full torch build for your accelerator.** Simplest, and the right
+default. Downloads ~3 GB.
 
 ```bash
-# example: driver supports up to CUDA 12.4
-pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
-pip install ".[local]"    # sentence-transformers, torch already satisfied
+uv sync --extra cu130
 ```
 
-No GPU, or don't care: just `pip install ".[local]"` and it'll pull a
-CPU-only or default CUDA build automatically.
+**B. CPU torch plus an ONNX Runtime or OpenVINO package.** `sentence-transformers`
+always requires torch, so it can't be avoided — but it can be made small and
+idle. The tiny CPU build (~200 MB) goes in, and a separate runtime does the
+actual compute:
+
+```bash
+uv sync --extra cpu --extra onnx-gpu     # NVIDIA, via CUDAExecutionProvider
+uv sync --extra cpu --extra openvino     # Intel CPU / iGPU / Arc
+uv sync --extra cpu --extra onnx         # CPU only -- still ~2-3x faster than torch on CPU
+```
+
+Installing one of those does nothing on its own; the project (or the global
+defaults) has to ask for it. In the UI that's **Embedding → Runtime + Device**;
+in YAML:
+
+```yaml
+embedding:
+  backend: local
+  local:
+    runtime: onnx      # torch | onnx | openvino
+    device: cuda       # -> CUDAExecutionProvider
+```
+
+```yaml
+# the Intel equivalent
+embedding:
+  backend: local
+  local:
+    runtime: openvino
+    device: xpu        # -> OpenVINO "GPU"
+```
+
+**Choose B when** the download size matters, you're running on CPU (ONNX and
+OpenVINO are both meaningfully faster there than torch), or you have an Intel
+iGPU that `torch.xpu` doesn't cover. **Choose A when** you have an AMD GPU
+(ONNX Runtime's ROCm package lags well behind torch's) or you'd rather not
+have the first run pause to export the model to ONNX — that export is cached
+afterwards, but some models fail to export at all.
+
+### What each accelerator actually covers
+
+- **CUDA** — any NVIDIA GPU the wheel's CUDA version supports.
+- **ROCm** — AMD discrete GPUs on ROCm's support list (RX 7000/9000 series,
+  Instinct). AMD **integrated** GPUs — Radeon 780M (`gfx1103`), Strix Halo
+  (`gfx1151`) — are not officially supported but generally work by lying about
+  the architecture: `HSA_OVERRIDE_GFX_VERSION=11.0.0 python app.py <user_dir>`.
+- **XPU** — Intel Arc A/B-series discrete cards, Core Ultra processors with
+  built-in Arc graphics (Meteor/Arrow/Lunar/Panther Lake), and Data Center GPU
+  Max. Requires Intel's GPU driver. Older Intel iGPUs (Iris Xe and earlier) are
+  **not** covered — use the `openvino` runtime for those.
+- **MPS** — Apple Silicon. The plain PyPI torch wheel is already the MPS build.
+- **Intel NPU** — there is no PyTorch backend for it, and `device: npu` under
+  the `openvino` runtime is expected to fail on most embedding models:
+  OpenVINO's NPU compiler needs static shapes, while sentence-transformer
+  encoders tokenize to variable-length sequences. It's selectable so it works
+  the day that changes; treat it as unsupported until then.
+
+### Adding a torch + index combination that isn't listed
+
+The targets above are just table entries. To add one — say CUDA 11.8 for an old
+driver — edit four spots in `pyproject.toml`:
+
+```toml
+# 1. the index. Browse https://download.pytorch.org/whl/ for the names, and
+#    https://download.pytorch.org/whl/cu118/torch/ for the versions it carries.
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+# 2. the extra
+[project.optional-dependencies]
+cu118 = ["papersieve[local]", "torch>=2.4,<2.8"]
+
+# 3. route torch to the index for that extra
+[tool.uv.sources]
+torch = [..., { index = "pytorch-cu118", extra = "cu118" }]
+
+# 4. add { extra = "cu118" } to the [tool.uv] conflicts list
+```
+
+Then `uv lock && uv sync --extra cu118`. If torch complains about a missing
+`triton-*` package, add that to the same extra and route it to the same index —
+newer torch builds require a matching one.
+
+For a one-off machine you don't want to encode in the project at all, skip the
+edits and install torch over the top:
+
+```bash
+uv sync --extra local --inexact          # sentence-transformers, no torch pin
+uv pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu118
+```
+
+### Installing with pip instead
+
+pip has no way to attach an index to an extra, so `pip install ".[cu130]"`
+would silently pull the default PyPI torch. `uv pip install` ignores
+`[tool.uv.sources]` for the same pip-compatibility reason. With either, install
+torch yourself first, then the `local` extra:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu130
+pip install ".[local]"    # sentence-transformers; torch already satisfied
+```
+
+### Running it
 
 Pick (and create) a user directory — anywhere outside this checkout, e.g.
 `~/papersieve-data`. This is where projects, `global_config.yaml`, and `.env`
@@ -56,7 +181,7 @@ will live:
 ```bash
 mkdir -p ~/papersieve-data
 cp .env.example ~/papersieve-data/.env   # only needed if you use the "api" embedding backend
-python app.py ~/papersieve-data
+uv run app.py ~/papersieve-data          # or: .venv/bin/python app.py ~/papersieve-data
 ```
 
 Open `http://localhost:5000/`. `user_dir` is a required argument — the app
@@ -140,8 +265,18 @@ inherit every value here unless they override it (see below). Covers:
   your machine, no API key) or `"api"` (calls an OpenAI-compatible
   embeddings endpoint).
 - `embedding.local.model`: the `sentence-transformers` model name.
+- `embedding.local.runtime`: `"torch"` (default), `"onnx"` or `"openvino"` —
+  which inference runtime loads the model. The latter two need their extra
+  installed; see "Two ways to use a GPU" above.
+- `embedding.local.device`: `"auto"` (default) detects one. Otherwise
+  `cpu`, `cuda`, `mps` or `xpu` for the `torch` runtime; `cpu`, `xpu` or `npu`
+  for `openvino`; those plus `rocm` for `onnx`. Two things surprise people:
+  ROCm builds of torch identify as **`cuda`**, so AMD users pick `cuda` here
+  (`rocm` is an ONNX Runtime provider name only), and an invalid
+  runtime/device pair fails at the start of a run with a message listing what
+  that runtime accepts.
 - `embedding.local.batch_size`: texts encoded per forward pass. Leave empty
-  (`null`) to size it from the detected device — 64 on CUDA/MPS, 16 on CPU.
+  (`null`) to size it from the device — 64 on CUDA/ROCm/XPU/MPS, 16 on CPU.
   Lower it if you run out of GPU memory.
 - `embedding.api.base_url` / `.model`: the OpenAI-compatible endpoint and
   the model to request from it.

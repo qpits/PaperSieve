@@ -14,6 +14,31 @@
     <label>Local model
       <input type="text" name="local_model" value="{{ config.embedding.local.model }}">
     </label>
+    <label>Runtime
+      <select name="local_runtime" id="localRuntimeSelect">
+        {% for r in RUNTIMES %}
+          <option value="{{ r }}" {% if config.embedding.local.runtime == r %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Device
+      <select name="local_device">
+        {% for d in LOCAL_DEVICES %}
+          <option value="{{ d }}" {% if config.embedding.local.device == d %}selected{% endif %}>{{ d }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="hint">
+      <code>torch</code> needs nothing beyond the accelerator's own install
+      target; <code>onnx</code> and <code>openvino</code> need their extra
+      installed (see the README's Setup section). <code>auto</code> detects the
+      device. Two quirks worth knowing: ROCm builds of torch identify as
+      <code>cuda</code>, so AMD users pick <code>cuda</code> here —
+      <code>rocm</code> is an ONNX Runtime provider name only. And
+      <code>npu</code> only exists for <code>openvino</code>, where it is
+      expected to fail on most embedding models (its compiler requires static
+      shapes). An invalid runtime/device pair is rejected when the run starts.
+    </p>
     <details class="advanced">
       <summary>Advanced</summary>
       <label>Batch size
@@ -22,7 +47,7 @@
       </label>
       <p class="hint">
         How many texts are encoded at once. Leave empty to pick one from the
-        detected device (64 on CUDA/MPS, 16 on CPU); lower it if you run out
+        detected device (64 on CUDA/ROCm/XPU/MPS, 16 on CPU); lower it if you run out
         of GPU memory.
       </p>
     </details>

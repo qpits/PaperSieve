@@ -36,12 +36,26 @@ import yaml
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
-from pipeline import DEFAULT_CONFIG, deep_merge, load_project_config, slugify, write_status
+from pipeline import (
+    DEFAULT_CONFIG,
+    LOCAL_DEVICES,
+    RUNTIMES,
+    deep_merge,
+    load_project_config,
+    slugify,
+    valid_devices,
+    write_status,
+)
 from sources import DEFAULT_SOURCE, SOURCES, get_source
 
 BASE_DIR = Path(__file__).parent  # code directory: templates/, static/, pipeline.py
 
 app = Flask(__name__)
+
+# The local runtime/device choices are pipeline.py's; exposing them as Jinja
+# globals keeps templates/_config_fields.html from hardcoding (and drifting
+# from) the sets that resolve_device() actually accepts.
+app.jinja_env.globals.update(RUNTIMES=RUNTIMES, LOCAL_DEVICES=LOCAL_DEVICES)
 
 REQUIRED_ENV_KEYS = ["OPENREVIEW_USERNAME", "OPENREVIEW_PASSWORD", "OPENAI_API_KEY", "HF_TOKEN"]
 
@@ -142,11 +156,22 @@ def parse_optional_int(raw: str, empty=None):
 def parse_global_fields(form) -> dict:
     """The embedding/tiers block. The global Settings form and each project's
     override form post exactly these fields, so they parse in one place."""
+    # runtime/device come from <select>s, but this is still a trust boundary:
+    # validate against the sets pipeline.py accepts and fall back to the
+    # defaults rather than persisting whatever was posted.
+    runtime = form.get("local_runtime", "torch")
+    if runtime not in RUNTIMES:
+        runtime = "torch"
+    device = form.get("local_device", "auto")
+    if device not in valid_devices(runtime):
+        device = "auto"
     return {
         "embedding": {
             "backend": form.get("backend", "local"),
             "local": {
                 "model": form.get("local_model", "").strip(),
+                "runtime": runtime,
+                "device": device,
                 "batch_size": parse_optional_int(form.get("local_batch_size")),
             },
             "api": {

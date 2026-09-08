@@ -25,6 +25,8 @@ FIELD_FOR_KEY = {
     "queries": "queries",
     "embedding.backend": "backend",
     "embedding.local.model": "local_model",
+    "embedding.local.runtime": "local_runtime",
+    "embedding.local.device": "local_device",
     "embedding.local.batch_size": "local_batch_size",
     "embedding.api.base_url": "api_base_url",
     "embedding.api.model": "api_model",
@@ -39,6 +41,7 @@ BASE_FORM = {
     "queries": "graph neural networks", "max_papers": "1000",
     "submission_invitation": "Submission", "venue_filter": "accepted",
     "backend": "local", "local_model": "some/model", "local_batch_size": "",
+    "local_runtime": "torch", "local_device": "auto",
     "api_base_url": "http://localhost:1234/v1", "api_model": "m",
     "api_key_env": "OPENAI_API_KEY", "api_batch_size": "",
     "tier_method": "percentile", "good_threshold": "80", "medium_threshold": "50",
@@ -110,6 +113,27 @@ def test_globals_are_inherited_until_overridden(root, client):
     assert not (set(A.GLOBAL_CONFIG_KEYS) & set(own())), "unticking must restore inheritance"
 
 
+def test_runtime_device_pairs_are_validated(root, client):
+    project_dir = root / "projects" / "iclr-cc-2026-conference"
+    local = lambda: yaml.safe_load((project_dir / "config.yaml").read_text())["embedding"]["local"]
+
+    post = lambda **extra: client.post(
+        "/project/iclr-cc-2026-conference/config",
+        data={**BASE_FORM, "override_globals": "1", **extra})
+
+    post(local_runtime="openvino", local_device="xpu")
+    assert (local()["runtime"], local()["device"]) == ("openvino", "xpu"), local()
+
+    # a device the chosen runtime can't use falls back rather than being stored
+    post(local_runtime="openvino", local_device="cuda")
+    assert (local()["runtime"], local()["device"]) == ("openvino", "auto"), local()
+
+    post(local_runtime="tensorrt", local_device="cuda")
+    assert (local()["runtime"], local()["device"]) == ("torch", "cuda"), local()
+
+    client.post("/project/iclr-cc-2026-conference/config", data=BASE_FORM)
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -117,4 +141,5 @@ if __name__ == "__main__":
         test_global_config_seeded(root, client)
         test_every_config_key_is_editable(root, client)
         test_globals_are_inherited_until_overridden(root, client)
+        test_runtime_device_pairs_are_validated(root, client)
     print("ok")
